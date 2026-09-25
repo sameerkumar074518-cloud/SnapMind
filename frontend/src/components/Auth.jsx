@@ -92,8 +92,8 @@ function Auth({ onLogin }) {
     try {
       const endpoint =
         mode === "login"
-          ? "http://localhost:5000/api/auth/login"
-          : "http://localhost:5000/api/auth/register";
+          ? "https://snapmind-4t5b.onrender.com/api/auth/login"
+          : "https://snapmind-4t5b.onrender.com/api/auth/register";
 
       const body =
         mode === "login"

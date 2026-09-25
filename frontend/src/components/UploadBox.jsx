@@ -89,7 +89,7 @@ function UploadBox({ onUploadComplete }) {
       const token = localStorage.getItem("snapmind_token");
 
       const response = await fetch(
-        "http://localhost:5000/api/upload",
+        "https://snapmind-4t5b.onrender.com/api/upload",
         {
           method: "POST",
           headers: {

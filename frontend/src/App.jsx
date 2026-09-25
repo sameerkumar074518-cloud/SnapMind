@@ -162,7 +162,7 @@ function App() {
       const token = localStorage.getItem("snapmind_token");
 
       const response = await fetch(
-        "http://localhost:5000/api/screenshots",
+        "https://snapmind-4t5b.onrender.com/api/screenshots",
         {
           headers: {
             Authorization: `Bearer ${token}`,
@@ -202,7 +202,7 @@ function App() {
       const token = localStorage.getItem("snapmind_token");
 
       const response = await fetch(
-        `http://localhost:5000/api/screenshots/${id}/important`,
+        `https://snapmind-4t5b.onrender.com/api/screenshots/${id}/important`,
         {
           method: "PATCH",
           headers: {
@@ -258,7 +258,7 @@ const deleteScreenshot = async (id) => {
     const token = localStorage.getItem("snapmind_token");
 
     const response = await fetch(
-      `http://localhost:5000/api/screenshots/${id}`,
+      `https://snapmind-4t5b.onrender.com/api/screenshots/${id}`,
       {
         method: "DELETE",
         headers: {

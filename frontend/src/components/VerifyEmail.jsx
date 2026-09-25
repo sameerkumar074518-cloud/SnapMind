@@ -15,7 +15,7 @@ function VerifyEmail({ token, onDone }) {
     const runVerification = async () => {
       try {
         const response = await fetch(
-          "http://localhost:5000/api/auth/verify-email",
+          "https://snapmind-4t5b.onrender.com/api/auth/verify-email",
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
