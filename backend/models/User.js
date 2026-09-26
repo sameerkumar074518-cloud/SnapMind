@@ -32,10 +32,6 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
-        resetPasswordExpires: {
-      type: Date,
-      default: null,
-    },
 
     // Email verification support.
     isEmailVerified: {

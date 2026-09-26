@@ -662,5 +662,5 @@ app.use((error, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`SnapMind server running on http://localhost:${PORT}`);
+  console.log(`SnapMind server running on port ${PORT}`);
 });

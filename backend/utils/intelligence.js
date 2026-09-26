@@ -57,7 +57,9 @@ function extractPhone(text) {
 function extractOrderId(text) {
   return firstMatch(text, [
     /(?:order\s*(?:id|no|number)|order)\s*[:#-]?\s*([A-Z0-9-]{4,})/i,
+
     /(?:transaction\s*(?:id|no|number)|txn\s*(?:id|no))\s*[:#-]?\s*([A-Z0-9-]{4,})/i,
+
     /(?:booking\s*(?:id|no|number)|pnr)\s*[:#-]?\s*([A-Z0-9-]{4,})/i,
   ]);
 }
