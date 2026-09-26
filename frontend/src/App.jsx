@@ -31,6 +31,7 @@ const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 function App() {
   const uploadRef = useRef(null);
   const categoriesRef = useRef(null);
+  const searchWrapperRef = useRef(null);
 
   // ==============================
   // PASSWORD RESET DEEP LINK
@@ -81,6 +82,7 @@ function App() {
   const [showImportant, setShowImportant] = useState(false);
   const [showRecentOnly, setShowRecentOnly] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [activeShot, setActiveShot] = useState(null);
   const [modalClosing, setModalClosing] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -125,6 +127,7 @@ function App() {
         }
 
         setNavOpen(false);
+        setIsSearchOpen(false);
       }
     };
 
@@ -136,6 +139,27 @@ function App() {
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeShot]);
+
+  // ==============================
+  // CLOSE SEARCH DROPDOWN ON OUTSIDE CLICK
+  // ==============================
+
+  useEffect(() => {
+    const onClickOutside = (e) => {
+      if (
+        searchWrapperRef.current &&
+        !searchWrapperRef.current.contains(e.target)
+      ) {
+        setIsSearchOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", onClickOutside);
+
+    return () => {
+      document.removeEventListener("mousedown", onClickOutside);
+    };
+  }, []);
 
   // ==============================
   // MODAL BODY SCROLL LOCK
@@ -352,6 +376,32 @@ const deleteScreenshot = async (id) => {
 
   const normalizedSearch =
     searchQuery.trim().toLowerCase();
+
+  // Quick search results shown in the dropdown right under the search
+  // bar. Deliberately ignores category/important/recent filters —
+  // typing a search should always search everything, so results
+  // appear immediately without the user having to clear other
+  // filters first (and without scrolling down to the library grid,
+  // which is the whole point on mobile).
+  const searchResults = normalizedSearch
+    ? screenshots.filter((screenshot) => {
+        const searchableText = [
+          screenshot.originalName || "",
+          screenshot.extractedText || "",
+          screenshot.category || "",
+        ]
+          .join(" ")
+          .toLowerCase();
+
+        return searchableText.includes(normalizedSearch);
+      })
+    : [];
+
+  const SEARCH_DROPDOWN_LIMIT = 6;
+  const visibleSearchResults = searchResults.slice(
+    0,
+    SEARCH_DROPDOWN_LIMIT
+  );
 
   // ==============================
   // AVAILABLE CATEGORIES
@@ -696,37 +746,128 @@ if (!user) {
             <Menu size={20} />
           </button>
 
-          <div className="search-box">
+          <div
+            className="search-wrapper"
+            ref={searchWrapperRef}
+          >
 
-            <Search size={17} />
+            <div className="search-box">
 
-            <input
-              type="text"
-              placeholder="Search your screenshots..."
-              value={searchQuery}
-              onChange={(e) =>
-                setSearchQuery(
-                  e.target.value
-                )
-              }
-            />
+              <Search size={17} />
 
-            {searchQuery && (
-              <button
-                className="search-clear"
-                onClick={() =>
-                  setSearchQuery("")
+              <input
+                type="text"
+                placeholder="Search your screenshots..."
+                value={searchQuery}
+                onFocus={() =>
+                  setIsSearchOpen(true)
                 }
-                aria-label="Clear search"
-              >
-                <X size={14} />
-              </button>
-            )}
+                onChange={(e) => {
+                  setSearchQuery(
+                    e.target.value
+                  );
+                  setIsSearchOpen(true);
+                }}
+              />
 
-            {!searchQuery && (
-              <span className="search-shortcut">
-                ⌘K
-              </span>
+              {searchQuery && (
+                <button
+                  className="search-clear"
+                  onClick={() => {
+                    setSearchQuery("");
+                  }}
+                  aria-label="Clear search"
+                >
+                  <X size={14} />
+                </button>
+              )}
+
+              {!searchQuery && (
+                <span className="search-shortcut">
+                  ⌘K
+                </span>
+              )}
+
+            </div>
+
+            {/* Quick search results — appear directly under the
+                search bar instead of requiring a scroll to the
+                library section below. Critical on mobile. */}
+            {isSearchOpen && normalizedSearch && (
+
+              <div className="search-dropdown">
+
+                {searchResults.length === 0 ? (
+
+                  <div className="search-dropdown-empty">
+                    Nothing matched "{searchQuery}".
+                  </div>
+
+                ) : (
+
+                  <>
+
+                    {visibleSearchResults.map(
+                      (screenshot) => (
+
+                        <button
+                          key={screenshot._id}
+                          className="search-result-item"
+                          onClick={() => {
+                            setActiveShot(screenshot);
+                            setIsSearchOpen(false);
+                          }}
+                        >
+
+                          <img
+                            src={screenshot.imageUrl}
+                            alt={screenshot.originalName}
+                          />
+
+                          <div className="search-result-info">
+
+                            <span className="search-result-name">
+                              {screenshot.originalName}
+                            </span>
+
+                            <span className="search-result-category">
+                              {screenshot.category ||
+                                "Other"}
+                            </span>
+
+                          </div>
+
+                        </button>
+
+                      )
+                    )}
+
+                    {searchResults.length >
+                      SEARCH_DROPDOWN_LIMIT && (
+
+                      <button
+                        className="search-dropdown-viewall"
+                        onClick={() => {
+                          setSelectedCategory("All");
+                          setShowImportant(false);
+                          setShowRecentOnly(false);
+                          setIsSearchOpen(false);
+
+                          scrollToLibrary();
+                        }}
+                      >
+                        See all {searchResults.length}{" "}
+                        results
+                      </button>
+
+                    )}
+
+                  </>
+
+                )}
+
+              </div>
+
             )}
 
           </div>
