@@ -61,230 +61,58 @@ async function categorizeText(extractedText, imageBuffer, mimeType) {
     // --------------------------------------------------
     // MULTIMODAL CLASSIFICATION PROMPT
     // --------------------------------------------------
+    //
+    // Kept concise on purpose: long, example-heavy prompts tend to make
+    // the model pattern-match on keywords/examples rather than actually
+    // reasoning about the screenshot's core subject. This version leads
+    // with a clear visual-first instruction, gives tight one-line
+    // category definitions, and states the few genuinely tricky
+    // disambiguation rules (sports vs. generic gaming/shopping/other)
+    // explicitly instead of via long example lists.
 
     const prompt = `
-You are SnapMind's advanced multimodal screenshot classification AI.
+You are an expert screenshot classifier for a screenshot-memory app.
 
-Your job is to classify the screenshot into EXACTLY ONE category.
+TASK: Look at the IMAGE first. Identify what it is fundamentally
+ABOUT (its main subject/purpose) — the app or website, the people,
+objects, logos, UI, scenes, or documents shown. Use the OCR text
+below only as secondary, supporting evidence to confirm or refine
+what you see; never classify from OCR keywords alone, especially
+when the image contains little or no text.
 
-AVAILABLE CATEGORIES:
-${ALLOWED_CATEGORIES.join(", ")}
+If the image and OCR text ever conflict, trust the image unless the
+OCR text unambiguously names a specific app/brand/subject (e.g.
+"Netflix", "OTP", "cricket") that the image alone doesn't make clear.
 
-==================================================
-IMPORTANT: VISUAL ANALYSIS FIRST
-==================================================
+Pick exactly ONE category from this list, choosing the one that best
+matches the screenshot's core subject as a whole (not an isolated UI
+word like "pass", "ticket", or "card" — ask what that item is FOR):
 
-You MUST analyze the actual image visually.
+- Study: education — lectures, exams, assignments, notes, textbooks, courses.
+- Work: professional/business — meetings, workplace docs, office tools, projects.
+- Shopping: retail products, stores, carts, orders, checkout for physical goods.
+- Social: social/messaging apps and feeds — Instagram, WhatsApp, Discord, chats.
+- Entertainment: movies, TV, music, YouTube, streaming, or general (non-sport) games.
+- Finance: banking, UPI/payments, transactions, investments, cards, balances.
+- News: news sites, articles, headlines, journalism.
+- Travel: flights, hotels, bookings, maps, trip planning.
+- Sports: anything whose core subject is a real-world sport (cricket, football,
+  basketball, tennis, etc.) — teams, players, matches, stadiums, scoreboards,
+  sports apps/games, fantasy sports, and sport-themed passes/tickets/invites.
+  A sports video game or an esports/sports-branded pass is Sports, not
+  Entertainment or Shopping, because the subject matter is the sport.
+- Personal: personal photos, family/friends, memories, personal documents.
+- Security: passwords, OTPs, 2FA, verification, login/account-security screens.
+- Technology: code, GitHub, dev tools, software/hardware, AI, technical docs.
+- Other: only if, after considering the image and OCR together, there is
+  genuinely no identifiable main subject. Last resort — use rarely.
 
-Do NOT classify the screenshot using OCR text alone.
+OCR TEXT (supporting evidence only):
+${extractedText || "(none detected)"}
 
-First inspect:
-- People
-- Objects
-- Clothing
-- Environment
-- Scenes
-- Logos
-- Applications
-- Websites
-- UI elements
-- Products
-- Documents
-- Charts
-- Sports equipment, jerseys, stadiums, scoreboards, teams
-- Locations
-- Visual symbols
-- Overall visual context
-
-Then use OCR text as SUPPORTING evidence.
-
-OCR is NOT the primary source of classification.
-
-A screenshot may contain:
-- very little text
-- no readable text
-- a filename only
-- blurry text
-- images/photos with no text
-
-You must STILL classify it using visual understanding.
-
-==================================================
-MAIN CLASSIFICATION RULE
-==================================================
-
-Choose the category that best represents the MAIN SUBJECT,
-MAIN PURPOSE, or MAIN CONTENT of the screenshot as a whole.
-
-Think about what the screenshot is FUNDAMENTALLY ABOUT before
-picking a category, not what UI element or document type it is.
-
-Do NOT classify based on a single isolated keyword, a UI pattern
-(like "pass", "ticket", "card", "screen"), or surface-level wording.
-Look at the SUBJECT MATTER those words refer to.
-
-For example: a "Beta Pass", "Ticket", or "Card" is not automatically
-"Other" just because those words are generic — you must ask what the
-pass/ticket/card is actually FOR. If it is for a cricket game, esports
-tournament, or any sport, the correct category is Sports, not Other.
-
-Use the complete visual + textual context together, and resolve
-ambiguity by asking: "What is this screenshot really about, at its core?"
-
-==================================================
-CATEGORY GUIDELINES
-==================================================
-
-Study:
-Educational content, lectures, exams, assignments, textbooks,
-notes, students studying, academic websites, college material,
-question papers or learning resources.
-
-Work:
-Professional work, meetings, business documents, workplace
-communication, project management, office tasks or professional
-applications. Not personal finance or personal social content.
-
-Shopping:
-Products, online stores, shopping carts, product listings,
-orders, prices, shopping websites or purchase screens for
-physical or retail goods (not game passes or subscriptions).
-
-Social:
-Instagram, Facebook, WhatsApp, Discord, Telegram, Messenger,
-social feeds, chats, conversations or social interaction.
-
-Entertainment:
-Movies, TV shows, Netflix, Prime Video, YouTube entertainment,
-Spotify, music, general video games, gaming platforms, or other
-entertainment content that is NOT specifically about a real-world
-sport (cricket, football, basketball, etc.) — sport-themed content,
-including sports video games, esports passes, or sports-branded
-game items, belongs in Sports instead, because the subject matter
-is the sport itself.
-
-Finance:
-Banking, UPI, payments, transactions, investments, stocks,
-credit cards, debit cards, account balances or financial apps.
-
-News:
-News websites, newspapers, breaking news, news broadcasts,
-articles or journalism.
-
-Travel:
-Flights, airports, hotels, maps, tourism, destinations,
-travel bookings or trip planning.
-
-Sports:
-ANY content whose core subject is a sport: cricket, football,
-soccer, basketball, tennis, badminton, sports teams, athletes,
-players, stadiums, matches, tournaments, leagues, scoreboards,
-sports equipment, sporting events, sports apps/games, fantasy
-sports, sports betting, and sports-related passes, tickets,
-beta invites, or promotional items (e.g. "eCricket Closed Beta
-Pass" is Sports because the subject is cricket — the word "Pass"
-does NOT make it Other or Shopping).
-
-Personal:
-Personal photographs, memories, family/friends photos,
-personal documents or personal content that does not fit
-another category.
-
-Security:
-Passwords, OTPs, authentication, two-factor authentication,
-verification, privacy, security settings or account protection.
-
-Technology:
-Programming, source code, GitHub, software development,
-computers, devices, technical documentation, AI, developer tools
-or technology-related content that is not primarily about a
-specific sport, finance, or shopping product.
-
-Other:
-Use ONLY as a last resort, when the screenshot genuinely has
-no identifiable main subject and truly does not fit any category
-above, even after considering its visual content, branding, and
-subject matter. Do not use Other just because a screenshot has an
-unusual UI element like "pass" or "invite" — always classify by
-what the pass/invite is actually for.
-
-==================================================
-IMPORTANT VISUAL EXAMPLES
-==================================================
-
-A photograph of a cricket team on a cricket field
-→ Sports
-
-A football match screenshot
-→ Sports
-
-An "eCricket Closed Beta Pass" or any cricket-themed app/game pass
-→ Sports (subject = cricket, not Other, not Shopping)
-
-A photograph of students inside a classroom
-→ Study
-
-A screenshot of a laptop showing source code
-→ Technology
-
-A product page showing shoes and a Buy Now button
-→ Shopping
-
-A bank account/payment screen
-→ Finance
-
-An Instagram feed
-→ Social
-
-A Netflix movie screen
-→ Entertainment
-
-A generic (non-sport) mobile game screen
-→ Entertainment
-
-A flight booking page
-→ Travel
-
-A password/OTP verification screen
-→ Security
-
-A personal family photograph
-→ Personal
-
-==================================================
-OCR TEXT
-==================================================
-
-${extractedText || "(No OCR text detected)"}
-
-==================================================
-CONFLICT RESOLUTION
-==================================================
-
-If the visual content and the OCR text seem to disagree, trust the
-VISUAL context unless the OCR text clearly and unambiguously
-establishes the screenshot's true purpose (e.g. a clear app name,
-website name, or subject-specific term like "cricket", "OTP",
-"Netflix", "checkout").
-
-==================================================
-FINAL INSTRUCTION
-==================================================
-
-Analyze the IMAGE first.
-
-Use OCR only to confirm or refine the visual interpretation.
-
-Return EXACTLY ONE category from this list:
-
-${ALLOWED_CATEGORIES.join(", ")}
-
-Return ONLY the category name.
-
-Do not explain your answer.
-Do not return JSON.
-Do not return multiple categories.
-`;
+Respond with ONLY the single category name from the list above.
+No punctuation, no explanation, no JSON, no extra words.
+`.trim();
 
     // --------------------------------------------------
     // GEMINI MULTIMODAL REQUEST
