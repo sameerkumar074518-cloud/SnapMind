@@ -24,8 +24,10 @@ const ALLOWED_CATEGORIES = [
 // secondary vision classifier when Gemini is unavailable (rate limit,
 // outage, account/project errors, etc). Requires GROQ_API_KEY.
 const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_VISION_MODEL =
-  process.env.GROQ_VISION_MODEL || "meta-llama/llama-4-scout-17b-16e-instruct";
+// meta-llama/llama-4-scout-17b-16e-instruct was retired from Groq's
+// vision lineup — qwen/qwen3.8-27b is the current supported
+// multimodal (image + text) model as of Groq's docs.
+const GROQ_VISION_MODEL = process.env.GROQ_VISION_MODEL || "qwen/qwen3.8-27b";
 
 // Groq rejects base64-encoded image requests larger than 4MB.
 const GROQ_MAX_BASE64_BYTES = 4 * 1024 * 1024;
@@ -242,6 +244,11 @@ async function classifyWithGroq(prompt, base64Image, mimeType) {
     body: JSON.stringify({
       model: GROQ_VISION_MODEL,
       temperature: 0,
+      // qwen3.8 supports tunable reasoning effort. We already ask for
+      // a short reasoning sentence directly in the prompt, so the
+      // model's own extended "thinking" mode is unnecessary overhead
+      // here — disable it for faster, more predictable output.
+      reasoning_effort: "none",
       // Raised from 20 -> 150: the prompt now asks for a short
       // reasoning sentence before the CATEGORY line, so a tight
       // token cap would truncate the answer before it gets there.
