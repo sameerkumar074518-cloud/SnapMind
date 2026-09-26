@@ -20,57 +20,31 @@ const ALLOWED_CATEGORIES = [
   "Other",
 ];
 
+// Groq's OpenAI-compatible chat completions endpoint. Used as the
+// secondary vision classifier when Gemini is unavailable (rate limit,
+// outage, account/project errors, etc). Requires GROQ_API_KEY.
+const GROQ_ENDPOINT = "https://api.groq.com/openai/v1/chat/completions";
+const GROQ_VISION_MODEL =
+  process.env.GROQ_VISION_MODEL || "meta-llama/llama-4-scout-17b-16e-instruct";
+
+// Groq rejects base64-encoded image requests larger than 4MB.
+const GROQ_MAX_BASE64_BYTES = 4 * 1024 * 1024;
+
 /**
- * AI-powered multimodal screenshot classification.
+ * Builds the shared multimodal classification prompt used by both
+ * Gemini and Groq, so the two providers are held to the same
+ * instructions and stay consistent with each other.
  *
- * Gemini analyzes:
- * 1. The actual image visually
- * 2. OCR extracted text
- * 3. Overall context
- *
- * Visual understanding is prioritized over OCR.
+ * Kept concise on purpose: long, example-heavy prompts tend to make
+ * the model pattern-match on keywords/examples rather than actually
+ * reasoning about the screenshot's core subject. This version leads
+ * with a clear visual-first instruction, gives tight one-line
+ * category definitions, and states the few genuinely tricky
+ * disambiguation rules (sports vs. generic gaming/shopping/other)
+ * explicitly instead of via long example lists.
  */
-async function categorizeText(extractedText, imageBuffer, mimeType) {
-  try {
-    // --------------------------------------------------
-    // GEMINI API KEY CHECK
-    // --------------------------------------------------
-
-    if (!process.env.GEMINI_API_KEY) {
-      console.warn(
-        "GEMINI_API_KEY is missing. Using fallback category."
-      );
-
-      return fallbackCategory(extractedText);
-    }
-
-    if (!imageBuffer) {
-      console.warn(
-        "No image buffer received. Using OCR fallback."
-      );
-
-      return fallbackCategory(extractedText);
-    }
-
-    // --------------------------------------------------
-    // CONVERT IMAGE TO BASE64
-    // --------------------------------------------------
-
-    const base64Image = imageBuffer.toString("base64");
-
-    // --------------------------------------------------
-    // MULTIMODAL CLASSIFICATION PROMPT
-    // --------------------------------------------------
-    //
-    // Kept concise on purpose: long, example-heavy prompts tend to make
-    // the model pattern-match on keywords/examples rather than actually
-    // reasoning about the screenshot's core subject. This version leads
-    // with a clear visual-first instruction, gives tight one-line
-    // category definitions, and states the few genuinely tricky
-    // disambiguation rules (sports vs. generic gaming/shopping/other)
-    // explicitly instead of via long example lists.
-
-    const prompt = `
+function buildClassificationPrompt(extractedText) {
+  return `
 You are an expert screenshot classifier for a screenshot-memory app.
 
 TASK: Look at the IMAGE first. Identify what it is fundamentally
@@ -113,118 +87,224 @@ ${extractedText || "(none detected)"}
 Respond with ONLY the single category name from the list above.
 No punctuation, no explanation, no JSON, no extra words.
 `.trim();
+}
 
-    // --------------------------------------------------
-    // GEMINI MULTIMODAL REQUEST
-    // --------------------------------------------------
+/**
+ * Cleans a raw model response and matches it against ALLOWED_CATEGORIES.
+ * Shared by both the Gemini and Groq code paths so response parsing
+ * behaves identically regardless of which provider answered.
+ *
+ * Returns the matched category name, or null if nothing matched.
+ */
+function parseCategoryResponse(rawText, providerLabel) {
+  if (!rawText) return null;
 
-    const response = await ai.models.generateContent({
-      model:
-        process.env.CLASSIFIER_MODEL ||
-        "gemini-2.5-flash",
+  const cleaned = rawText
+    .replace(/```/g, "")
+    .replace(/["']/g, "")
+    .replace(/\n/g, " ")
+    .replace(/[.:;]+$/g, "")
+    .trim();
 
-      contents: [
-        {
-          inlineData: {
-            mimeType: mimeType || "image/jpeg",
-            data: base64Image,
-          },
+  const exactMatch = ALLOWED_CATEGORIES.find(
+    (item) => item.toLowerCase() === cleaned.toLowerCase()
+  );
+
+  if (exactMatch) {
+    console.log(`${providerLabel} category (exact match):`, exactMatch);
+    return exactMatch;
+  }
+
+  // Model sometimes wraps the category in extra words (e.g.
+  // "Category: Sports" or "The answer is Sports."). Prefer the
+  // LONGEST matching category name to avoid a short category name
+  // accidentally matching inside a longer one.
+  const detectedCategories = ALLOWED_CATEGORIES.filter((item) =>
+    cleaned.toLowerCase().includes(item.toLowerCase())
+  ).sort((a, b) => b.length - a.length);
+
+  if (detectedCategories.length > 0) {
+    const detectedCategory = detectedCategories[0];
+    console.log(`${providerLabel} category (fuzzy match):`, detectedCategory);
+    return detectedCategory;
+  }
+
+  console.warn(`${providerLabel} returned an invalid/unrecognized category:`, cleaned);
+  return null;
+}
+
+/**
+ * Primary classifier: Gemini multimodal (image + OCR text).
+ * Throws on any failure so the caller can fall through to Groq.
+ */
+async function classifyWithGemini(prompt, base64Image, mimeType) {
+  const response = await ai.models.generateContent({
+    model: process.env.CLASSIFIER_MODEL || "gemini-2.5-flash",
+
+    contents: [
+      {
+        inlineData: {
+          mimeType: mimeType || "image/jpeg",
+          data: base64Image,
         },
+      },
+      {
+        text: prompt,
+      },
+    ],
+  });
+
+  const rawText = response.text?.trim();
+  console.log("Gemini raw category response:", rawText);
+
+  if (!rawText) {
+    throw new Error("Gemini returned an empty response");
+  }
+
+  const matched = parseCategoryResponse(rawText, "Gemini");
+
+  if (!matched) {
+    throw new Error(`Gemini returned an unrecognized category: ${rawText}`);
+  }
+
+  return matched;
+}
+
+/**
+ * Secondary classifier: Groq (Llama 4 Scout vision), used only when
+ * Gemini is unavailable. Groq exposes an OpenAI-compatible chat
+ * completions endpoint, so this uses a plain fetch call rather than
+ * pulling in an extra SDK dependency.
+ *
+ * Throws on any failure so the caller can fall through to the
+ * OCR-only regex fallback.
+ */
+async function classifyWithGroq(prompt, base64Image, mimeType) {
+  if (!process.env.GROQ_API_KEY) {
+    throw new Error("GROQ_API_KEY is not set");
+  }
+
+  // Groq rejects base64 image payloads over 4MB — fail fast instead of
+  // spending a request that's guaranteed to 413.
+  const approxBytes = Math.ceil((base64Image.length * 3) / 4);
+  if (approxBytes > GROQ_MAX_BASE64_BYTES) {
+    throw new Error(
+      `Image too large for Groq base64 upload (~${(approxBytes / 1024 / 1024).toFixed(
+        1
+      )}MB, limit 4MB)`
+    );
+  }
+
+  const response = await fetch(GROQ_ENDPOINT, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.GROQ_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model: GROQ_VISION_MODEL,
+      temperature: 0,
+      max_tokens: 20,
+      messages: [
         {
-          text: prompt,
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:${mimeType || "image/jpeg"};base64,${base64Image}`,
+              },
+            },
+          ],
         },
       ],
-    });
+    }),
+  });
 
-    // --------------------------------------------------
-    // GET GEMINI RESPONSE
-    // --------------------------------------------------
-
-    let category = response.text?.trim();
-
-    console.log("Gemini raw category response:", category);
-
-    if (!category) {
-      console.warn(
-        "Gemini returned an empty response. Using fallback."
-      );
-
-      return fallbackCategory(extractedText);
-    }
-
-    // --------------------------------------------------
-    // CLEAN GEMINI RESPONSE
-    // --------------------------------------------------
-
-    category = category
-      .replace(/```/g, "")
-      .replace(/["']/g, "")
-      .replace(/\n/g, " ")
-      .replace(/[.:;]+$/g, "")
-      .trim();
-
-    // --------------------------------------------------
-    // EXACT CATEGORY MATCH
-    // --------------------------------------------------
-
-    const exactMatch = ALLOWED_CATEGORIES.find(
-      (item) =>
-        item.toLowerCase() === category.toLowerCase()
+  if (!response.ok) {
+    const errorBody = await response.text().catch(() => "");
+    throw new Error(
+      `Groq API request failed (${response.status}): ${errorBody || response.statusText}`
     );
+  }
 
-    if (exactMatch) {
-      console.log("Final category (exact match):", exactMatch);
+  const data = await response.json();
+  const rawText = data?.choices?.[0]?.message?.content?.trim();
 
-      return exactMatch;
-    }
+  console.log("Groq raw category response:", rawText);
 
-    // --------------------------------------------------
-    // HANDLE EXTRA GEMINI TEXT
-    // --------------------------------------------------
-    // Gemini sometimes wraps the category in extra words
-    // (e.g. "Category: Sports" or "The answer is Sports.").
-    // Prefer the LONGEST matching category name to avoid a
-    // short category name accidentally matching inside a
-    // longer one (there are no current collisions, but this
-    // keeps the matching robust as categories evolve).
+  if (!rawText) {
+    throw new Error("Groq returned an empty response");
+  }
 
-    const detectedCategories = ALLOWED_CATEGORIES.filter((item) =>
-      category.toLowerCase().includes(item.toLowerCase())
-    ).sort((a, b) => b.length - a.length);
+  const matched = parseCategoryResponse(rawText, "Groq");
 
-    if (detectedCategories.length > 0) {
-      const detectedCategory = detectedCategories[0];
+  if (!matched) {
+    throw new Error(`Groq returned an unrecognized category: ${rawText}`);
+  }
 
-      console.log(
-        "Gemini detected category (fuzzy match):",
-        detectedCategory
-      );
+  return matched;
+}
 
-      return detectedCategory;
-    }
-
-    // --------------------------------------------------
-    // INVALID GEMINI RESPONSE
-    // --------------------------------------------------
-
-    console.warn(
-      "Gemini returned an invalid/unrecognized category:",
-      category
-    );
-
-    return fallbackCategory(extractedText);
-  } catch (error) {
-    // --------------------------------------------------
-    // GEMINI ERROR FALLBACK
-    // --------------------------------------------------
-
-    console.error(
-      "Gemini categorization error:",
-      error.message
-    );
-
+/**
+ * AI-powered multimodal screenshot classification.
+ *
+ * Tries providers in order, each analyzing the actual image visually
+ * with OCR text as supporting context:
+ *   1. Gemini (primary)
+ *   2. Groq / Llama 4 Scout vision (secondary — only used if Gemini fails)
+ *   3. OCR-only regex fallback (last resort — no image analysis)
+ *
+ * This means a Gemini outage, rate limit, or account issue no longer
+ * dumps every screenshot into "Other" — Groq picks up the slack as
+ * long as GROQ_API_KEY is configured.
+ */
+async function categorizeText(extractedText, imageBuffer, mimeType) {
+  if (!imageBuffer) {
+    console.warn("No image buffer received. Using OCR fallback.");
     return fallbackCategory(extractedText);
   }
+
+  const base64Image = imageBuffer.toString("base64");
+  const prompt = buildClassificationPrompt(extractedText);
+
+  // --------------------------------------------------
+  // 1. PRIMARY: GEMINI
+  // --------------------------------------------------
+
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      return await classifyWithGemini(prompt, base64Image, mimeType);
+    } catch (error) {
+      console.error("Gemini categorization error:", error.message);
+    }
+  } else {
+    console.warn("GEMINI_API_KEY is missing. Skipping Gemini.");
+  }
+
+  // --------------------------------------------------
+  // 2. SECONDARY: GROQ (only reached if Gemini was skipped or failed)
+  // --------------------------------------------------
+
+  if (process.env.GROQ_API_KEY) {
+    try {
+      const category = await classifyWithGroq(prompt, base64Image, mimeType);
+      console.log("Classified via Groq fallback:", category);
+      return category;
+    } catch (error) {
+      console.error("Groq categorization error:", error.message);
+    }
+  } else {
+    console.warn("GROQ_API_KEY is missing. Skipping Groq fallback.");
+  }
+
+  // --------------------------------------------------
+  // 3. LAST RESORT: OCR-ONLY REGEX FALLBACK
+  // --------------------------------------------------
+
+  console.warn("All AI classifiers unavailable. Using OCR fallback.");
+  return fallbackCategory(extractedText);
 }
 
 /**
@@ -233,13 +313,11 @@ No punctuation, no explanation, no JSON, no extra words.
  * ----------------------------------------------------
  *
  * Used when:
- * - Gemini API is unavailable
- * - API key is missing
- * - Gemini returns invalid output
+ * - Both Gemini and Groq are unavailable, unconfigured, or fail
  * - Image is unavailable
  *
  * This fallback uses OCR text only, so it is intentionally
- * more conservative than the multimodal Gemini path. Checks
+ * more conservative than the multimodal AI paths. Checks
  * are ordered so that highly specific / unambiguous domains
  * (Sports, Security, Finance, Technology, Study) are tested
  * before broader, easily-confused categories (Work, News,
