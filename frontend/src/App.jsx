@@ -454,15 +454,6 @@ const deleteScreenshot = async (id) => {
   // AUTH SCREEN
   // ==============================
 
-  if (resetToken) {
-  return (
-    <ResetPassword
-      token={resetToken}
-      onComplete={clearResetToken}
-    />
-  );
-}
-
 // ==============================
 // RESET PASSWORD SCREEN
 // ==============================

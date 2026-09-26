@@ -44,7 +44,7 @@ function Auth({ onLogin }) {
 
       try {
         const response = await fetch(
-          "http://localhost:5000/api/auth/forgot-password",
+          "https://snapmind-4t5b.onrender.com/api/auth/forgot-password",
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
