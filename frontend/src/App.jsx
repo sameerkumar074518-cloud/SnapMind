@@ -79,6 +79,7 @@ function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [showImportant, setShowImportant] = useState(false);
+  const [showRecentOnly, setShowRecentOnly] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
   const [activeShot, setActiveShot] = useState(null);
   const [modalClosing, setModalClosing] = useState(false);
@@ -97,6 +98,7 @@ function App() {
     setSearchQuery("");
     setSelectedCategory("All");
     setShowImportant(false);
+    setShowRecentOnly(false);
     setNavOpen(false);
     setActiveShot(null);
   };
@@ -320,6 +322,17 @@ const deleteScreenshot = async (id) => {
     });
   };
 
+  const scrollToLibrary = () => {
+    window.setTimeout(() => {
+      document
+        .getElementById("library")
+        ?.scrollIntoView({
+          behavior: "smooth",
+          block: "start",
+        });
+    }, 50);
+  };
+
   // ==============================
   // CLOSE MODAL
   // ==============================
@@ -374,6 +387,19 @@ const deleteScreenshot = async (id) => {
         return false;
       }
 
+      if (showRecentOnly) {
+        const created = new Date(
+          screenshot.createdAt
+        ).getTime();
+
+        if (
+          Date.now() - created >
+          RECENT_WINDOW_MS
+        ) {
+          return false;
+        }
+      }
+
       const screenshotCategory =
         screenshot.category || "Other";
 
@@ -409,16 +435,10 @@ const deleteScreenshot = async (id) => {
 
   const handleCategorySelect = (category) => {
     setShowImportant(false);
+    setShowRecentOnly(false);
     setSelectedCategory(category);
 
-    window.setTimeout(() => {
-      document
-        .getElementById("library")
-        ?.scrollIntoView({
-          behavior: "smooth",
-          block: "start",
-        });
-    }, 50);
+    scrollToLibrary();
   };
 
   // ==============================
@@ -533,9 +553,10 @@ if (!user) {
           <a
             className="sidebar-link active"
             href="#home"
-            onClick={() =>
-              setShowImportant(false)
-            }
+            onClick={() => {
+              setShowImportant(false);
+              setShowRecentOnly(false);
+            }}
           >
             <LayoutGrid size={17} />
             Dashboard
@@ -545,9 +566,10 @@ if (!user) {
           <a
             className="sidebar-link"
             href="#library"
-            onClick={() =>
-              setShowImportant(false)
-            }
+            onClick={() => {
+              setShowImportant(false);
+              setShowRecentOnly(false);
+            }}
           >
             <Images size={17} />
             Screenshots
@@ -574,18 +596,12 @@ if (!user) {
             }`}
             onClick={() => {
               setShowImportant(true);
+              setShowRecentOnly(false);
               setSelectedCategory("All");
               setSearchQuery("");
               setNavOpen(false);
 
-              window.setTimeout(() => {
-                document
-                  .getElementById("library")
-                  ?.scrollIntoView({
-                    behavior: "smooth",
-                    block: "start",
-                  });
-              }, 50);
+              scrollToLibrary();
             }}
           >
             <Star size={17} />
@@ -593,13 +609,25 @@ if (!user) {
           </button>
 
           {/* Recent */}
-          <a
-            className="sidebar-link"
-            href="#recent"
+          <button
+            className={`sidebar-link sidebar-link-button ${
+              showRecentOnly
+                ? "active"
+                : ""
+            }`}
+            onClick={() => {
+              setShowRecentOnly(true);
+              setShowImportant(false);
+              setSelectedCategory("All");
+              setSearchQuery("");
+              setNavOpen(false);
+
+              scrollToLibrary();
+            }}
           >
             <Clock3 size={17} />
             Recent
-          </a>
+          </button>
 
         </nav>
 
@@ -840,7 +868,19 @@ if (!user) {
 
             </div>
 
-            <div className="stat-card">
+            <div
+              className="stat-card stat-card-clickable"
+              role="button"
+              tabIndex={0}
+              onClick={() => {
+                setShowRecentOnly(true);
+                setShowImportant(false);
+                setSelectedCategory("All");
+                setSearchQuery("");
+
+                scrollToLibrary();
+              }}
+            >
 
               <div className="stat-icon">
                 <Clock3 size={18} />
@@ -954,6 +994,8 @@ if (!user) {
                 <h2>
                   {showImportant
                     ? "Important screenshots"
+                    : showRecentOnly
+                    ? "Recent screenshots"
                     : normalizedSearch
                     ? "Search results"
                     : selectedCategory !==
@@ -970,6 +1012,13 @@ if (!user) {
                           ? ""
                           : "s"
                       }`
+                    : showRecentOnly
+                    ? `${filteredScreenshots.length} screenshot${
+                        filteredScreenshots.length ===
+                        1
+                          ? ""
+                          : "s"
+                      } from the last 7 days`
                     : normalizedSearch
                     ? `${filteredScreenshots.length} screenshot${
                         filteredScreenshots.length ===
@@ -993,7 +1042,8 @@ if (!user) {
               {(normalizedSearch ||
                 selectedCategory !==
                   "All" ||
-                showImportant) && (
+                showImportant ||
+                showRecentOnly) && (
 
                 <button
                   className="view-all-btn"
@@ -1001,6 +1051,7 @@ if (!user) {
                     setSearchQuery("");
                     setSelectedCategory("All");
                     setShowImportant(false);
+                    setShowRecentOnly(false);
                   }}
                 >
                   Show all
@@ -1012,7 +1063,8 @@ if (!user) {
               {!normalizedSearch &&
                 selectedCategory ===
                   "All" &&
-                !showImportant && (
+                !showImportant &&
+                !showRecentOnly && (
 
                   <button
                     className="view-all-btn"
@@ -1052,6 +1104,8 @@ if (!user) {
                 <h3>
                   {showImportant
                     ? "No important screenshots"
+                    : showRecentOnly
+                    ? "No recent screenshots"
                     : normalizedSearch
                     ? "No screenshots found"
                     : selectedCategory !==
@@ -1063,6 +1117,8 @@ if (!user) {
                 <p>
                   {showImportant
                     ? "You haven't marked any screenshots as important yet."
+                    : showRecentOnly
+                    ? "You don't have any screenshots from the last 7 days."
                     : normalizedSearch
                     ? `Nothing matched "${searchQuery}". Try another keyword or category.`
                     : selectedCategory !==
@@ -1072,6 +1128,7 @@ if (!user) {
                 </p>
 
                 {showImportant ||
+                showRecentOnly ||
                 normalizedSearch ||
                 selectedCategory !==
                   "All" ? (
@@ -1082,6 +1139,7 @@ if (!user) {
                       setSearchQuery("");
                       setSelectedCategory("All");
                       setShowImportant(false);
+                      setShowRecentOnly(false);
                     }}
                   >
                     <X size={16} />
