@@ -35,32 +35,34 @@ const GROQ_MAX_BASE64_BYTES = 4 * 1024 * 1024;
  * Gemini and Groq, so the two providers are held to the same
  * instructions and stay consistent with each other.
  *
- * Kept concise on purpose: long, example-heavy prompts tend to make
- * the model pattern-match on keywords/examples rather than actually
- * reasoning about the screenshot's core subject. This version leads
- * with a clear visual-first instruction, gives tight one-line
- * category definitions, and states the few genuinely tricky
- * disambiguation rules (sports vs. generic gaming/shopping/other)
- * explicitly instead of via long example lists.
+ * KEY CHANGE: this now asks for a short burst of visual reasoning
+ * BEFORE the category, instead of forcing an instant one-word answer.
+ * A full chat assistant (Claude/ChatGPT) reasons over the image and
+ * text together before committing to a conclusion — a bare
+ * "return only the category" prompt throws that reasoning away and
+ * makes the model pattern-match instead of actually looking. Letting
+ * it "think out loud" for 1-2 sentences first, then state the
+ * category on its own final line, recovers most of that benefit
+ * while still giving us a single line we can reliably parse.
  */
 function buildClassificationPrompt(extractedText) {
   return `
 You are an expert screenshot classifier for a screenshot-memory app.
 
-TASK: Look at the IMAGE first. Identify what it is fundamentally
-ABOUT (its main subject/purpose) — the app or website, the people,
-objects, logos, UI, scenes, or documents shown. Use the OCR text
-below only as secondary, supporting evidence to confirm or refine
-what you see; never classify from OCR keywords alone, especially
-when the image contains little or no text.
+STEP 1 — LOOK: Examine the IMAGE itself first — the app or website,
+people, objects, logos, UI, scenes, products, or documents shown.
+Use the OCR text below only as secondary, supporting evidence to
+confirm or refine what you see; never classify from OCR keywords
+alone, especially when the image contains little or no text.
 
-If the image and OCR text ever conflict, trust the image unless the
-OCR text unambiguously names a specific app/brand/subject (e.g.
-"Netflix", "OTP", "cricket") that the image alone doesn't make clear.
+STEP 2 — THINK: In 1-2 short sentences, describe what the screenshot
+is fundamentally ABOUT — its main subject or purpose (not an isolated
+UI word like "pass", "ticket", or "card" — ask what that item is FOR).
+If the image and OCR text conflict, trust the image unless the OCR
+text unambiguously names a specific app/brand/subject (e.g. "Netflix",
+"OTP", "cricket") that the image alone doesn't make clear.
 
-Pick exactly ONE category from this list, choosing the one that best
-matches the screenshot's core subject as a whole (not an isolated UI
-word like "pass", "ticket", or "card" — ask what that item is FOR):
+STEP 3 — CLASSIFY: Pick exactly ONE category from this list:
 
 - Study: education — lectures, exams, assignments, notes, textbooks, courses.
 - Work: professional/business — meetings, workplace docs, office tools, projects.
@@ -84,13 +86,21 @@ word like "pass", "ticket", or "card" — ask what that item is FOR):
 OCR TEXT (supporting evidence only):
 ${extractedText || "(none detected)"}
 
-Respond with ONLY the single category name from the list above.
-No punctuation, no explanation, no JSON, no extra words.
+OUTPUT FORMAT (strict):
+Line 1: your 1-2 sentence reasoning from STEP 2.
+Line 2: exactly "CATEGORY: <name>" where <name> is one category from
+the list above, with no extra words, punctuation, or explanation on
+that line.
 `.trim();
 }
 
 /**
- * Cleans a raw model response and matches it against ALLOWED_CATEGORIES.
+ * Parses a model response that ends with a "CATEGORY: <name>" line
+ * (see buildClassificationPrompt) and matches it against
+ * ALLOWED_CATEGORIES. Falls back to scanning the whole response for a
+ * category name if the model didn't follow the exact format, so a
+ * missing "CATEGORY:" prefix doesn't waste a perfectly good answer.
+ *
  * Shared by both the Gemini and Groq code paths so response parsing
  * behaves identically regardless of which provider answered.
  *
@@ -99,37 +109,65 @@ No punctuation, no explanation, no JSON, no extra words.
 function parseCategoryResponse(rawText, providerLabel) {
   if (!rawText) return null;
 
-  const cleaned = rawText
-    .replace(/```/g, "")
-    .replace(/["']/g, "")
-    .replace(/\n/g, " ")
-    .replace(/[.:;]+$/g, "")
-    .trim();
+  const cleanLine = (line) =>
+    line
+      .replace(/```/g, "")
+      .replace(/^category\s*:\s*/i, "")
+      .replace(/["']/g, "")
+      .replace(/[.:;]+$/g, "")
+      .trim();
 
-  const exactMatch = ALLOWED_CATEGORIES.find(
-    (item) => item.toLowerCase() === cleaned.toLowerCase()
-  );
+  const matchAgainstCategories = (text) => {
+    const exactMatch = ALLOWED_CATEGORIES.find(
+      (item) => item.toLowerCase() === text.toLowerCase()
+    );
+    if (exactMatch) return exactMatch;
 
-  if (exactMatch) {
-    console.log(`${providerLabel} category (exact match):`, exactMatch);
-    return exactMatch;
+    // Model sometimes wraps the category in extra words. Prefer the
+    // LONGEST matching category name to avoid a short category name
+    // accidentally matching inside a longer one.
+    const detected = ALLOWED_CATEGORIES.filter((item) =>
+      text.toLowerCase().includes(item.toLowerCase())
+    ).sort((a, b) => b.length - a.length);
+
+    return detected.length > 0 ? detected[0] : null;
+  };
+
+  // Prefer the explicit "CATEGORY: <name>" line — this is the line we
+  // asked for, so check it first regardless of what reasoning text
+  // precedes it.
+  const lines = rawText
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const categoryLine = [...lines].reverse().find((l) => /^category\s*:/i.test(l));
+
+  if (categoryLine) {
+    const matched = matchAgainstCategories(cleanLine(categoryLine));
+    if (matched) {
+      console.log(`${providerLabel} category (from CATEGORY line):`, matched);
+      return matched;
+    }
   }
 
-  // Model sometimes wraps the category in extra words (e.g.
-  // "Category: Sports" or "The answer is Sports."). Prefer the
-  // LONGEST matching category name to avoid a short category name
-  // accidentally matching inside a longer one.
-  const detectedCategories = ALLOWED_CATEGORIES.filter((item) =>
-    cleaned.toLowerCase().includes(item.toLowerCase())
-  ).sort((a, b) => b.length - a.length);
-
-  if (detectedCategories.length > 0) {
-    const detectedCategory = detectedCategories[0];
-    console.log(`${providerLabel} category (fuzzy match):`, detectedCategory);
-    return detectedCategory;
+  // Fallback: no well-formed "CATEGORY:" line found — scan the last
+  // line, then the whole response, for a valid category name instead
+  // of discarding an otherwise-usable answer.
+  const lastLine = lines[lines.length - 1] || "";
+  const matchedLastLine = matchAgainstCategories(cleanLine(lastLine));
+  if (matchedLastLine) {
+    console.log(`${providerLabel} category (from last line):`, matchedLastLine);
+    return matchedLastLine;
   }
 
-  console.warn(`${providerLabel} returned an invalid/unrecognized category:`, cleaned);
+  const matchedAnywhere = matchAgainstCategories(cleanLine(rawText.replace(/\n/g, " ")));
+  if (matchedAnywhere) {
+    console.log(`${providerLabel} category (fuzzy match, full text):`, matchedAnywhere);
+    return matchedAnywhere;
+  }
+
+  console.warn(`${providerLabel} returned an invalid/unrecognized category:`, rawText);
   return null;
 }
 
@@ -155,7 +193,7 @@ async function classifyWithGemini(prompt, base64Image, mimeType) {
   });
 
   const rawText = response.text?.trim();
-  console.log("Gemini raw category response:", rawText);
+  console.log("Gemini raw response:", rawText);
 
   if (!rawText) {
     throw new Error("Gemini returned an empty response");
@@ -204,7 +242,10 @@ async function classifyWithGroq(prompt, base64Image, mimeType) {
     body: JSON.stringify({
       model: GROQ_VISION_MODEL,
       temperature: 0,
-      max_tokens: 20,
+      // Raised from 20 -> 150: the prompt now asks for a short
+      // reasoning sentence before the CATEGORY line, so a tight
+      // token cap would truncate the answer before it gets there.
+      max_tokens: 150,
       messages: [
         {
           role: "user",
@@ -232,7 +273,7 @@ async function classifyWithGroq(prompt, base64Image, mimeType) {
   const data = await response.json();
   const rawText = data?.choices?.[0]?.message?.content?.trim();
 
-  console.log("Groq raw category response:", rawText);
+  console.log("Groq raw response:", rawText);
 
   if (!rawText) {
     throw new Error("Groq returned an empty response");
@@ -251,7 +292,8 @@ async function classifyWithGroq(prompt, base64Image, mimeType) {
  * AI-powered multimodal screenshot classification.
  *
  * Tries providers in order, each analyzing the actual image visually
- * with OCR text as supporting context:
+ * with OCR text as supporting context, and each reasoning briefly
+ * before committing to a category (see buildClassificationPrompt):
  *   1. Gemini (primary)
  *   2. Groq / Llama 4 Scout vision (secondary — only used if Gemini fails)
  *   3. OCR-only regex fallback (last resort — no image analysis)
