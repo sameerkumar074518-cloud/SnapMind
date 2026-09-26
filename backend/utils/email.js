@@ -1,22 +1,81 @@
-const nodemailer = require("nodemailer");
+// Sends transactional emails through Brevo's HTTP API (https://api.brevo.com).
+//
+// Why the API instead of SMTP: some hosts (Render included, on certain plans)
+// are inconsistent about outbound SMTP ports, and SMTP credentials are a
+// second thing to rotate/misconfigure. The HTTP API just needs one API key
+// over normal HTTPS, which every host allows.
+//
+// Required environment variables:
+//   BREVO_API_KEY  - your Brevo API key (Settings -> SMTP & API -> API Keys)
+//   EMAIL_FROM     - the sender address. This MUST be a verified sender (or
+//                    part of a verified domain) in your Brevo account, or
+//                    Brevo will reject the send.
+//
+// Requires Node 18+ for the built-in global `fetch`. If your runtime is
+// older than that, install `node-fetch` and replace the fetch call below.
 
-// Reads SMTP config from environment variables only — never hardcode
-// credentials, and never send them to the frontend.
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST,
-  port: Number(process.env.EMAIL_PORT) || 587,
-  secure: process.env.EMAIL_SECURE === "true", // true for port 465
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
+const BREVO_API_URL = "https://api.brevo.com/v3/smtp/email";
+const SENDER_NAME = "SnapMind";
+
+async function sendViaBrevo({ to, subject, html }) {
+  const apiKey = process.env.BREVO_API_KEY;
+
+  if (!apiKey) {
+    throw new Error(
+      "BREVO_API_KEY is not set. Add it to your environment variables."
+    );
+  }
+
+  const fromEmail = process.env.EMAIL_FROM;
+
+  if (!fromEmail) {
+    throw new Error(
+      "EMAIL_FROM is not set. Add it to your environment variables."
+    );
+  }
+
+  const response = await fetch(BREVO_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "api-key": apiKey,
+    },
+    body: JSON.stringify({
+      sender: { name: SENDER_NAME, email: fromEmail },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+    }),
+  });
+
+  if (!response.ok) {
+    let details;
+
+    try {
+      details = await response.json();
+    } catch (parseError) {
+      details = await response.text().catch(() => "(no response body)");
+    }
+
+    const error = new Error(
+      `Brevo API request failed with status ${response.status}: ${
+        typeof details === "string" ? details : JSON.stringify(details)
+      }`
+    );
+
+    error.code = "BREVO_API_ERROR";
+    error.status = response.status;
+    error.details = details;
+
+    throw error;
+  }
+
+  return response.json();
+}
 
 async function sendPasswordResetEmail(toEmail, resetUrl) {
-  const fromAddress = process.env.EMAIL_FROM || process.env.EMAIL_USER;
-
-  await transporter.sendMail({
-    from: `"SnapMind" <${fromAddress}>`,
+  await sendViaBrevo({
     to: toEmail,
     subject: "Reset your SnapMind password",
     html: `
@@ -40,10 +99,7 @@ async function sendPasswordResetEmail(toEmail, resetUrl) {
 }
 
 async function sendWelcomeVerificationEmail(toEmail, name, verifyUrl) {
-  const fromAddress = process.env.EMAIL_FROM || process.env.EMAIL_USER;
-
-  await transporter.sendMail({
-    from: `"SnapMind" <${fromAddress}>`,
+  await sendViaBrevo({
     to: toEmail,
     subject: "Welcome to SnapMind — verify your email",
     html: `
