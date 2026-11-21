@@ -17,14 +17,35 @@ const extractText = require("./utils/ocr");
 const { sendPasswordResetEmail, sendWelcomeVerificationEmail } = require("./utils/email");
 const { categorizeText } = require("./utils/categorize");
 const { extractIntelligence } = require("./utils/intelligence");
+const {
+  buildScreenshotEmbeddingText,
+  generateEmbedding,
+} = require("./utils/embeddings");
+const { hybridSearch } = require("./utils/searchService");
+const { migrateMissingEmbeddings } = require("./utils/migrateEmbeddings");
 
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
 
 const app = express();
-const PORT = 5000;
+
+// Render (and most hosts) assign the port dynamically via process.env.PORT
+// and expect the app to bind to that value. The "|| 5000" fallback keeps
+// local development (`npm run dev`) working exactly as before.
+const PORT = process.env.PORT || 5000;
+
+// Support either MONGODB_URI or MONGO_URI, since different environments
+// (local .env vs. hosting dashboards) may have been set up with either
+// name. Prefer MONGODB_URI when both are present.
+const mongoUri = process.env.MONGODB_URI || process.env.MONGO_URI;
+
+if (!mongoUri) {
+  console.error(
+    "No Mongo connection string found. Set MONGODB_URI (or MONGO_URI) in your environment."
+  );
+}
 
 mongoose
-  .connect(process.env.MONGODB_URI, {
+  .connect(mongoUri, {
     serverSelectionTimeoutMS: 10000,
   })
   .then(() => {
@@ -194,6 +215,32 @@ console.log("Gemini assigned category:", category);
             console.log("Extracted intelligence:");
             console.log(aiData);
 
+            // Generate semantic text embedding for hybrid AI search
+            let embedding = undefined;
+            try {
+              const embeddingText = buildScreenshotEmbeddingText({
+                originalName: req.file.originalname,
+                category,
+                extractedText,
+                aiData,
+              });
+
+              if (embeddingText) {
+                console.log("Generating semantic embedding for screenshot...");
+                embedding = await generateEmbedding(embeddingText);
+                if (embedding) {
+                  console.log(
+                    `Semantic embedding generated successfully! (${embedding.length} dimensions) ✅`
+                  );
+                }
+              }
+            } catch (embedError) {
+              console.warn(
+                "Embedding generation encountered an error (continuing upload without embedding):",
+                embedError.message
+              );
+            }
+
             const screenshot = new Screenshot({
               userId: req.user.userId,
               originalName: req.file.originalname,
@@ -203,6 +250,7 @@ console.log("Gemini assigned category:", category);
               extractedText: extractedText,
               category: category,
               aiData: aiData,
+              ...(embedding ? { embedding } : {}),
             });
 
             await screenshot.save();
@@ -502,6 +550,127 @@ app.post("/api/auth/reset-password", async (req, res) => {
     });
   }
 });
+
+// Hybrid AI Search endpoint (protected — searches only the authenticated user's screenshots)
+// Supports keyword search, semantic search with Gemini embeddings, and Reciprocal Rank Fusion
+app.get("/api/screenshots/search", authenticateToken, async (req, res) => {
+  try {
+    const {
+      q,
+      query,
+      category,
+      startDate,
+      endDate,
+      important,
+      page = 1,
+      limit = 50,
+    } = req.query;
+
+    const searchQuery = q || query || "";
+    const isImportant =
+      important === "true" ? true : important === "false" ? false : undefined;
+
+    const result = await hybridSearch({
+      userId: req.user.userId,
+      query: searchQuery,
+      category,
+      startDate,
+      endDate,
+      important: isImportant,
+      page,
+      limit,
+    });
+
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error("Hybrid search error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "An error occurred while executing search.",
+      error: error.message,
+    });
+  }
+});
+
+// POST version of search for complex or longer payloads
+app.post("/api/screenshots/search", authenticateToken, async (req, res) => {
+  try {
+    const {
+      query,
+      q,
+      category,
+      startDate,
+      endDate,
+      important,
+      page = 1,
+      limit = 50,
+    } = req.body;
+
+    const searchQuery = query || q || "";
+
+    const result = await hybridSearch({
+      userId: req.user.userId,
+      query: searchQuery,
+      category,
+      startDate,
+      endDate,
+      important,
+      page,
+      limit,
+    });
+
+    res.json({
+      success: true,
+      ...result,
+    });
+  } catch (error) {
+    console.error("Hybrid search error:", error);
+
+    res.status(500).json({
+      success: false,
+      message: "An error occurred while executing search.",
+      error: error.message,
+    });
+  }
+});
+
+// Safe batch migration endpoint for screenshots missing embeddings (protected)
+app.post(
+  "/api/screenshots/migrate-embeddings",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { batchSize = 10, maxDocs = 200 } = req.body;
+
+      console.log(
+        `[Migration Request] Initiated by user ${req.user.userId} (batchSize=${batchSize}, maxDocs=${maxDocs})`
+      );
+
+      const summary = await migrateMissingEmbeddings({
+        batchSize: Math.min(Math.max(parseInt(batchSize, 10) || 10, 1), 50),
+        maxDocs: Math.min(Math.max(parseInt(maxDocs, 10) || 200, 1), 500),
+      });
+
+      res.json({
+        success: true,
+        message: "Embedding migration finished.",
+        summary,
+      });
+    } catch (error) {
+      console.error("Migration endpoint error:", error);
+
+      res.status(500).json({
+        success: false,
+        message: "Failed to execute embedding migration.",
+        error: error.message,
+      });
+    }
+  }
+);
 
 // Get all saved screenshots (protected — only the logged-in user's own screenshots)
 app.get("/api/screenshots", authenticateToken, async (req, res) => {

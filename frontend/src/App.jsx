@@ -27,11 +27,22 @@ import {
 import UploadBox from "./components/UploadBox";
 
 const RECENT_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL || "https://snapmind-4t5b.onrender.com";
+
+const SEARCH_SUGGESTIONS = [
+  "Find my college fee payment screenshot",
+  "Show my Java programming notes",
+  "Find the hotel booking I saved",
+  "Show the product I wanted to purchase",
+  "Find the football score screenshot",
+];
 
 function App() {
   const uploadRef = useRef(null);
   const categoriesRef = useRef(null);
   const searchWrapperRef = useRef(null);
+  const searchInputRef = useRef(null);
 
   // ==============================
   // PASSWORD RESET DEEP LINK
@@ -78,6 +89,14 @@ function App() {
 
   const [screenshots, setScreenshots] = useState([]);
   const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
+  const [apiSearchResults, setApiSearchResults] = useState(null);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchType, setSearchType] = useState("hybrid");
+  const [dateFilter, setDateFilter] = useState("all");
+  const [customStartDate, setCustomStartDate] = useState("");
+  const [customEndDate, setCustomEndDate] = useState("");
+
   const [selectedCategory, setSelectedCategory] = useState("All");
   const [showImportant, setShowImportant] = useState(false);
   const [showRecentOnly, setShowRecentOnly] = useState(false);
@@ -98,6 +117,12 @@ function App() {
     setUser(null);
     setScreenshots([]);
     setSearchQuery("");
+    setDebouncedQuery("");
+    setApiSearchResults(null);
+    setIsSearching(false);
+    setDateFilter("all");
+    setCustomStartDate("");
+    setCustomEndDate("");
     setSelectedCategory("All");
     setShowImportant(false);
     setShowRecentOnly(false);
@@ -178,6 +203,137 @@ function App() {
   }, [activeShot]);
 
   // ==============================
+  // KEYBOARD SHORTCUT (⌘K / Ctrl+K)
+  // ==============================
+
+  useEffect(() => {
+    const handleGlobalKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        setIsSearchOpen(true);
+      }
+    };
+
+    window.addEventListener("keydown", handleGlobalKey);
+    return () => {
+      window.removeEventListener("keydown", handleGlobalKey);
+    };
+  }, []);
+
+  // ==============================
+  // SEARCH DEBOUNCING & HYBRID QUERY
+  // ==============================
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedQuery(searchQuery.trim());
+    }, 320);
+
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  useEffect(() => {
+    if (!debouncedQuery) {
+      setApiSearchResults(null);
+      setIsSearching(false);
+      return;
+    }
+
+    let isMounted = true;
+    setIsSearching(true);
+
+    const performHybridSearch = async () => {
+      try {
+        const token = localStorage.getItem("snapmind_token");
+        const params = new URLSearchParams({
+          q: debouncedQuery,
+        });
+
+        if (selectedCategory && selectedCategory !== "All") {
+          params.set("category", selectedCategory);
+        }
+
+        if (showImportant) {
+          params.set("important", "true");
+        }
+
+        if (dateFilter === "7d" || showRecentOnly) {
+          const d = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+          params.set("startDate", d.toISOString().split("T")[0]);
+        } else if (dateFilter === "30d") {
+          const d = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+          params.set("startDate", d.toISOString().split("T")[0]);
+        } else if (dateFilter === "custom") {
+          if (customStartDate) params.set("startDate", customStartDate);
+          if (customEndDate) params.set("endDate", customEndDate);
+        }
+
+        const response = await fetch(
+          `${API_BASE_URL}/api/screenshots/search?${params.toString()}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+          }
+        );
+
+        const data = await response.json();
+
+        if (isMounted && data.success) {
+          setApiSearchResults(data.screenshots || []);
+          setSearchType(data.searchType || "hybrid");
+        } else if (isMounted) {
+          fallbackLocalSearch();
+        }
+      } catch (err) {
+        console.warn(
+          "Backend hybrid search request failed, using client fallback:",
+          err
+        );
+        if (isMounted) {
+          fallbackLocalSearch();
+        }
+      } finally {
+        if (isMounted) {
+          setIsSearching(false);
+        }
+      }
+    };
+
+    const fallbackLocalSearch = () => {
+      const qLower = debouncedQuery.toLowerCase();
+      const localMatches = screenshots.filter((s) => {
+        const text = [
+          s.originalName || "",
+          s.extractedText || "",
+          s.category || "",
+        ]
+          .join(" ")
+          .toLowerCase();
+        return text.includes(qLower);
+      });
+      setApiSearchResults(localMatches);
+      setSearchType("keyword");
+    };
+
+    performHybridSearch();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [
+    debouncedQuery,
+    selectedCategory,
+    dateFilter,
+    customStartDate,
+    customEndDate,
+    showImportant,
+    showRecentOnly,
+    screenshots,
+  ]);
+
+  // ==============================
   // FETCH SCREENSHOTS
   // ==============================
 
@@ -188,7 +344,7 @@ function App() {
       const token = localStorage.getItem("snapmind_token");
 
       const response = await fetch(
-        "https://snapmind-4t5b.onrender.com/api/screenshots",
+        `${API_BASE_URL}/api/screenshots`,
         {
           headers: {
             Authorization: `Bearer ${token}`,
@@ -224,11 +380,26 @@ function App() {
       )
     );
 
+    if (apiSearchResults) {
+      setApiSearchResults((prev) =>
+        prev
+          ? prev.map((s) =>
+              s._id === id
+                ? {
+                    ...s,
+                    important: !currentValue,
+                  }
+                : s
+            )
+          : null
+      );
+    }
+
     try {
       const token = localStorage.getItem("snapmind_token");
 
       const response = await fetch(
-        `https://snapmind-4t5b.onrender.com/api/screenshots/${id}/important`,
+        `${API_BASE_URL}/api/screenshots/${id}/important`,
         {
           method: "PATCH",
           headers: {
@@ -264,6 +435,21 @@ function App() {
             : s
         )
       );
+
+      if (apiSearchResults) {
+        setApiSearchResults((prev) =>
+          prev
+            ? prev.map((s) =>
+                s._id === id
+                  ? {
+                      ...s,
+                      important: currentValue,
+                    }
+                  : s
+              )
+            : null
+        );
+      }
     }
   };
 
@@ -284,7 +470,7 @@ const deleteScreenshot = async (id) => {
     const token = localStorage.getItem("snapmind_token");
 
     const response = await fetch(
-      `https://snapmind-4t5b.onrender.com/api/screenshots/${id}`,
+      `${API_BASE_URL}/api/screenshots/${id}`,
       {
         method: "DELETE",
         headers: {
@@ -305,6 +491,12 @@ const deleteScreenshot = async (id) => {
     setScreenshots((prev) =>
       prev.filter((screenshot) => screenshot._id !== id)
     );
+
+    if (apiSearchResults) {
+      setApiSearchResults((prev) =>
+        prev ? prev.filter((screenshot) => screenshot._id !== id) : null
+      );
+    }
 
     // Close modal if the deleted screenshot was open
     if (activeShot?._id === id) {
@@ -371,19 +563,14 @@ const deleteScreenshot = async (id) => {
   };
 
   // ==============================
-  // SEARCH
+  // SEARCH & HYBRID RESULTS
   // ==============================
 
   const normalizedSearch =
     searchQuery.trim().toLowerCase();
 
-  // Quick search results shown in the dropdown right under the search
-  // bar. Deliberately ignores category/important/recent filters —
-  // typing a search should always search everything, so results
-  // appear immediately without the user having to clear other
-  // filters first (and without scrolling down to the library grid,
-  // which is the whole point on mobile).
-  const searchResults = normalizedSearch
+  // Local keyword search fallback
+  const localSearchResults = normalizedSearch
     ? screenshots.filter((screenshot) => {
         const searchableText = [
           screenshot.originalName || "",
@@ -397,11 +584,21 @@ const deleteScreenshot = async (id) => {
       })
     : [];
 
+  // Active search results: prefer API-returned hybrid AI results if available, else local fallback
+  const activeSearchResults =
+    apiSearchResults !== null ? apiSearchResults : localSearchResults;
+
   const SEARCH_DROPDOWN_LIMIT = 6;
-  const visibleSearchResults = searchResults.slice(
+  const visibleSearchResults = activeSearchResults.slice(
     0,
     SEARCH_DROPDOWN_LIMIT
   );
+
+  const handleSelectSuggestion = (suggestion) => {
+    setSearchQuery(suggestion);
+    setIsSearchOpen(false);
+    scrollToLibrary();
+  };
 
   // ==============================
   // AVAILABLE CATEGORIES
@@ -437,16 +634,34 @@ const deleteScreenshot = async (id) => {
         return false;
       }
 
-      if (showRecentOnly) {
-        const created = new Date(
-          screenshot.createdAt
-        ).getTime();
+      const created = new Date(
+        screenshot.createdAt
+      ).getTime();
 
+      if (dateFilter === "7d" || showRecentOnly) {
         if (
           Date.now() - created >
           RECENT_WINDOW_MS
         ) {
           return false;
+        }
+      } else if (dateFilter === "30d") {
+        if (
+          Date.now() - created >
+          30 * 24 * 60 * 60 * 1000
+        ) {
+          return false;
+        }
+      } else if (dateFilter === "custom") {
+        if (customStartDate && created < new Date(customStartDate).getTime()) {
+          return false;
+        }
+        if (customEndDate) {
+          const end = new Date(customEndDate);
+          end.setHours(23, 59, 59, 999);
+          if (created > end.getTime()) {
+            return false;
+          }
         }
       }
 
@@ -462,22 +677,13 @@ const deleteScreenshot = async (id) => {
         return false;
       }
 
-      if (!normalizedSearch) {
-        return true;
-      }
-
-      const searchableText = [
-        screenshot.originalName || "",
-        screenshot.extractedText || "",
-        screenshot.category || "",
-      ]
-        .join(" ")
-        .toLowerCase();
-
-      return searchableText.includes(
-        normalizedSearch
-      );
+      return true;
     });
+
+  // What to render in the main screenshot library grid
+  const displayedScreenshots = normalizedSearch
+    ? activeSearchResults
+    : filteredScreenshots;
 
   // ==============================
   // CATEGORY SELECT
@@ -756,8 +962,9 @@ if (!user) {
               <Search size={17} />
 
               <input
+                ref={searchInputRef}
                 type="text"
-                placeholder="Search your screenshots..."
+                placeholder="Ask SnapMind anything about your saved screenshots..."
                 value={searchQuery}
                 onFocus={() =>
                   setIsSearchOpen(true)
@@ -768,21 +975,28 @@ if (!user) {
                   );
                   setIsSearchOpen(true);
                 }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    setIsSearchOpen(false);
+                    scrollToLibrary();
+                  }
+                }}
               />
 
-              {searchQuery && (
+              {isSearching ? (
+                <Loader2 size={15} className="search-spinner" />
+              ) : searchQuery ? (
                 <button
                   className="search-clear"
                   onClick={() => {
                     setSearchQuery("");
+                    setApiSearchResults(null);
                   }}
                   aria-label="Clear search"
                 >
                   <X size={14} />
                 </button>
-              )}
-
-              {!searchQuery && (
+              ) : (
                 <span className="search-shortcut">
                   ⌘K
                 </span>
@@ -790,14 +1004,60 @@ if (!user) {
 
             </div>
 
-            {/* Quick search results — appear directly under the
-                search bar instead of requiring a scroll to the
-                library section below. Critical on mobile. */}
+            {/* Quick search suggestions dropdown when input is focused but empty */}
+            {isSearchOpen && !normalizedSearch && (
+              <div className="search-dropdown search-suggestions-dropdown">
+                <div className="search-suggestions-header">
+                  <Sparkles size={13} className="sparkles-icon" />
+                  <span>Ask anything in natural language</span>
+                </div>
+                <div className="search-suggestions-list">
+                  {SEARCH_SUGGESTIONS.map((suggestion, idx) => (
+                    <button
+                      key={idx}
+                      className="search-suggestion-item"
+                      onClick={() => handleSelectSuggestion(suggestion)}
+                    >
+                      <Search size={13} className="suggestion-icon" />
+                      <span>{suggestion}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Quick search results dropdown under the search bar */}
             {isSearchOpen && normalizedSearch && (
 
               <div className="search-dropdown">
 
-                {searchResults.length === 0 ? (
+                <div className="search-dropdown-header">
+                  <span className="search-mode-badge">
+                    <Sparkles size={12} />
+                    {isSearching
+                      ? "Searching with AI..."
+                      : searchType === "hybrid"
+                      ? "Hybrid AI Search"
+                      : searchType === "semantic"
+                      ? "Semantic Search"
+                      : "Keyword Search"}
+                  </span>
+                  {!isSearching && (
+                    <span className="search-count-badge">
+                      {activeSearchResults.length}{" "}
+                      {activeSearchResults.length === 1 ? "result" : "results"}
+                    </span>
+                  )}
+                </div>
+
+                {isSearching && activeSearchResults.length === 0 ? (
+
+                  <div className="search-dropdown-loading">
+                    <Loader2 size={18} className="search-spinner" />
+                    <span>Analyzing screenshot text and semantic meaning…</span>
+                  </div>
+
+                ) : activeSearchResults.length === 0 ? (
 
                   <div className="search-dropdown-empty">
                     Nothing matched "{searchQuery}".
@@ -822,6 +1082,7 @@ if (!user) {
                           <img
                             src={screenshot.imageUrl}
                             alt={screenshot.originalName}
+                            loading="lazy"
                           />
 
                           <div className="search-result-info">
@@ -830,10 +1091,20 @@ if (!user) {
                               {screenshot.originalName}
                             </span>
 
-                            <span className="search-result-category">
-                              {screenshot.category ||
-                                "Other"}
-                            </span>
+                            <div className="search-result-tags">
+                              <span className="search-result-category">
+                                {screenshot.category ||
+                                  "Other"}
+                              </span>
+                              {screenshot._searchMetadata?.matchReasons?.includes(
+                                "semantic"
+                              ) && (
+                                <span className="search-match-tag">
+                                  <Sparkles size={10} />
+                                  AI Match
+                                </span>
+                              )}
+                            </div>
 
                           </div>
 
@@ -842,21 +1113,17 @@ if (!user) {
                       )
                     )}
 
-                    {searchResults.length >
+                    {activeSearchResults.length >
                       SEARCH_DROPDOWN_LIMIT && (
 
                       <button
                         className="search-dropdown-viewall"
                         onClick={() => {
-                          setSelectedCategory("All");
-                          setShowImportant(false);
-                          setShowRecentOnly(false);
                           setIsSearchOpen(false);
-
                           scrollToLibrary();
                         }}
                       >
-                        See all {searchResults.length}{" "}
+                        See all {activeSearchResults.length}{" "}
                         results
                       </button>
 
@@ -1127,6 +1394,74 @@ if (!user) {
 
             </div>
 
+            {/* Date Filters */}
+            <div className="date-filter-section">
+              <div className="date-filter-label">
+                <CalendarDays size={14} />
+                <span>Filter by date:</span>
+              </div>
+              <div className="date-filter-list">
+                {[
+                  { id: "all", label: "All Time" },
+                  { id: "7d", label: "Last 7 Days" },
+                  { id: "30d", label: "Last 30 Days" },
+                  { id: "custom", label: "Custom Range" },
+                ].map((item) => (
+                  <button
+                    key={item.id}
+                    className={`date-filter-btn ${
+                      dateFilter === item.id ? "active" : ""
+                    }`}
+                    onClick={() => {
+                      setDateFilter(item.id);
+                      if (item.id === "7d") {
+                        setShowRecentOnly(true);
+                      } else {
+                        setShowRecentOnly(false);
+                      }
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+
+              {dateFilter === "custom" && (
+                <div className="custom-date-inputs">
+                  <div className="date-input-group">
+                    <label>From:</label>
+                    <input
+                      type="date"
+                      className="custom-date-field"
+                      value={customStartDate}
+                      onChange={(e) => setCustomStartDate(e.target.value)}
+                    />
+                  </div>
+                  <div className="date-input-group">
+                    <label>To:</label>
+                    <input
+                      type="date"
+                      className="custom-date-field"
+                      value={customEndDate}
+                      onChange={(e) => setCustomEndDate(e.target.value)}
+                    />
+                  </div>
+                  {(customStartDate || customEndDate) && (
+                    <button
+                      className="clear-date-btn"
+                      onClick={() => {
+                        setCustomStartDate("");
+                        setCustomEndDate("");
+                      }}
+                      title="Clear custom dates"
+                    >
+                      <X size={13} />
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* Library title */}
             <div className="section-title">
 
@@ -1135,10 +1470,26 @@ if (!user) {
                 <h2>
                   {showImportant
                     ? "Important screenshots"
-                    : showRecentOnly
+                    : showRecentOnly || dateFilter === "7d"
                     ? "Recent screenshots"
+                    : dateFilter === "30d"
+                    ? "Screenshots from last 30 days"
+                    : dateFilter === "custom"
+                    ? "Screenshots in custom date range"
                     : normalizedSearch
-                    ? "Search results"
+                    ? (
+                        <>
+                          Search results
+                          <span className="search-type-badge">
+                            <Sparkles size={12} />
+                            {searchType === "hybrid"
+                              ? "Hybrid AI Search"
+                              : searchType === "semantic"
+                              ? "Semantic Search"
+                              : "Keyword Search"}
+                          </span>
+                        </>
+                      )
                     : selectedCategory !==
                       "All"
                     ? `${selectedCategory} screenshots`
@@ -1147,30 +1498,30 @@ if (!user) {
 
                 <p>
                   {showImportant
-                    ? `${filteredScreenshots.length} important screenshot${
-                        filteredScreenshots.length ===
+                    ? `${displayedScreenshots.length} important screenshot${
+                        displayedScreenshots.length ===
                         1
                           ? ""
                           : "s"
                       }`
-                    : showRecentOnly
-                    ? `${filteredScreenshots.length} screenshot${
-                        filteredScreenshots.length ===
+                    : showRecentOnly || dateFilter === "7d"
+                    ? `${displayedScreenshots.length} screenshot${
+                        displayedScreenshots.length ===
                         1
                           ? ""
                           : "s"
                       } from the last 7 days`
                     : normalizedSearch
-                    ? `${filteredScreenshots.length} screenshot${
-                        filteredScreenshots.length ===
+                    ? `${displayedScreenshots.length} screenshot${
+                        displayedScreenshots.length ===
                         1
                           ? ""
                           : "s"
                       } found for "${searchQuery}"`
                     : selectedCategory !==
                       "All"
-                    ? `${filteredScreenshots.length} screenshot${
-                        filteredScreenshots.length ===
+                    ? `${displayedScreenshots.length} screenshot${
+                        displayedScreenshots.length ===
                         1
                           ? ""
                           : "s"
@@ -1183,6 +1534,7 @@ if (!user) {
               {(normalizedSearch ||
                 selectedCategory !==
                   "All" ||
+                dateFilter !== "all" ||
                 showImportant ||
                 showRecentOnly) && (
 
@@ -1190,7 +1542,11 @@ if (!user) {
                   className="view-all-btn"
                   onClick={() => {
                     setSearchQuery("");
+                    setApiSearchResults(null);
                     setSelectedCategory("All");
+                    setDateFilter("all");
+                    setCustomStartDate("");
+                    setCustomEndDate("");
                     setShowImportant(false);
                     setShowRecentOnly(false);
                   }}
@@ -1204,6 +1560,7 @@ if (!user) {
               {!normalizedSearch &&
                 selectedCategory ===
                   "All" &&
+                dateFilter === "all" &&
                 !showImportant &&
                 !showRecentOnly && (
 
@@ -1233,20 +1590,22 @@ if (!user) {
 
               </div>
 
-            ) : filteredScreenshots.length ===
+            ) : displayedScreenshots.length ===
               0 ? (
 
               <div className="empty-library">
 
                 <div className="empty-icon">
-                  <Search size={26} />
+                  {normalizedSearch ? <Sparkles size={26} /> : <Search size={26} />}
                 </div>
 
                 <h3>
                   {showImportant
                     ? "No important screenshots"
-                    : showRecentOnly
+                    : showRecentOnly || dateFilter === "7d"
                     ? "No recent screenshots"
+                    : dateFilter !== "all"
+                    ? "No screenshots found in this date range"
                     : normalizedSearch
                     ? "No screenshots found"
                     : selectedCategory !==
@@ -1258,18 +1617,39 @@ if (!user) {
                 <p>
                   {showImportant
                     ? "You haven't marked any screenshots as important yet."
-                    : showRecentOnly
+                    : showRecentOnly || dateFilter === "7d"
                     ? "You don't have any screenshots from the last 7 days."
                     : normalizedSearch
-                    ? `Nothing matched "${searchQuery}". Try another keyword or category.`
+                    ? `SnapMind searched titles, text, and semantic meaning for "${searchQuery}", but found no matches.`
                     : selectedCategory !==
                       "All"
                     ? `You don't have any screenshots in the ${selectedCategory} category yet.`
                     : "Upload your first screenshot and SnapMind will start building your personal library."}
                 </p>
 
+                {normalizedSearch && (
+                  <div className="empty-suggestions-container">
+                    <span className="suggestions-prompt">Try asking with natural language:</span>
+                    <div className="empty-suggestion-chips">
+                      {SEARCH_SUGGESTIONS.slice(0, 3).map((s, idx) => (
+                        <button
+                          key={idx}
+                          className="empty-suggestion-chip"
+                          onClick={() => {
+                            setSearchQuery(s);
+                            scrollToLibrary();
+                          }}
+                        >
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {showImportant ||
                 showRecentOnly ||
+                dateFilter !== "all" ||
                 normalizedSearch ||
                 selectedCategory !==
                   "All" ? (
@@ -1278,7 +1658,11 @@ if (!user) {
                     className="empty-upload-btn"
                     onClick={() => {
                       setSearchQuery("");
+                      setApiSearchResults(null);
                       setSelectedCategory("All");
+                      setDateFilter("all");
+                      setCustomStartDate("");
+                      setCustomEndDate("");
                       setShowImportant(false);
                       setShowRecentOnly(false);
                     }}
@@ -1305,7 +1689,7 @@ if (!user) {
 
               <div className="screenshot-grid">
 
-                {filteredScreenshots.map(
+                {displayedScreenshots.map(
                   (screenshot) => (
 
                     <div
@@ -1391,10 +1775,23 @@ if (!user) {
                             {screenshot.originalName}
                           </h3>
 
-                          <span className="screenshot-category">
-                            {screenshot.category ||
-                              "Other"}
-                          </span>
+                          <div className="screenshot-card-badges">
+                            <span className="screenshot-category">
+                              {screenshot.category ||
+                                "Other"}
+                            </span>
+                            {screenshot._searchMetadata?.matchReasons?.includes(
+                              "semantic"
+                            ) && (
+                              <span
+                                className="card-ai-badge"
+                                title="Matched using AI semantic understanding"
+                              >
+                                <Sparkles size={10} />
+                                AI
+                              </span>
+                            )}
+                          </div>
 
                         </div>
 

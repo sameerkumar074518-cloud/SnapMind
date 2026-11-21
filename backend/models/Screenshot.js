@@ -49,10 +49,27 @@ const screenshotSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+
+    // 768-dimensional vector embedding for semantic vector search
+    // Excluded from default queries to avoid transmitting large arrays over the wire
+    embedding: {
+      type: [Number],
+      select: false,
+      default: undefined,
+    },
   },
   {
     timestamps: true,
   }
 );
+
+// Optimize query performance with indexes
+screenshotSchema.index({ userId: 1, createdAt: -1 });
+screenshotSchema.index({ userId: 1, category: 1 });
+screenshotSchema.index({
+  originalName: "text",
+  extractedText: "text",
+  category: "text",
+});
 
 module.exports = mongoose.model("Screenshot", screenshotSchema);

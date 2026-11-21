@@ -2983,3 +2983,293 @@ a {
     right: -4px;
   }
 }
+
+/* ==============================
+   HYBRID AI SEARCH & DATE FILTER STYLES
+   ============================== */
+
+.search-spinner {
+  animation: spin 1s linear infinite;
+  color: var(--accent, #a78bfa);
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.search-suggestions-dropdown {
+  padding: 8px;
+}
+
+.search-suggestions-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #a78bfa;
+}
+
+.search-suggestions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-suggestion-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: transparent;
+  border: none;
+  color: #e2e8f0;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.search-suggestion-item:hover {
+  background: rgba(167, 139, 250, 0.12);
+  color: #fff;
+  transform: translateX(2px);
+}
+
+.search-suggestion-item .suggestion-icon {
+  color: #a78bfa;
+  flex-shrink: 0;
+}
+
+.search-dropdown-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.search-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #a78bfa;
+}
+
+.search-count-badge {
+  font-size: 0.75rem;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.search-dropdown-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 16px;
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.7);
+  justify-content: center;
+}
+
+.search-result-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.search-match-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 500;
+  background: rgba(167, 139, 250, 0.15);
+  color: #c4b5fd;
+  border: 1px solid rgba(167, 139, 250, 0.25);
+}
+
+.search-type-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  margin-left: 10px;
+  border-radius: 20px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: linear-gradient(135deg, rgba(167, 139, 250, 0.18), rgba(99, 102, 241, 0.18));
+  border: 1px solid rgba(167, 139, 250, 0.3);
+  color: #c4b5fd;
+  vertical-align: middle;
+}
+
+.screenshot-card-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.card-ai-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  background: rgba(167, 139, 250, 0.18);
+  color: #c4b5fd;
+  border: 1px solid rgba(167, 139, 250, 0.28);
+}
+
+/* Date Filter UI */
+.date-filter-section {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.date-filter-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-faint, rgba(255, 255, 255, 0.55));
+}
+
+.date-filter-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.date-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 12px;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  font-weight: 500;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.date-filter-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.date-filter-btn.active {
+  background: rgba(167, 139, 250, 0.18);
+  border-color: rgba(167, 139, 250, 0.4);
+  color: #c4b5fd;
+}
+
+.custom-date-inputs {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.date-input-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.custom-date-field {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: #fff;
+  padding: 4px 8px;
+  font-size: 0.78rem;
+  outline: none;
+  font-family: inherit;
+}
+
+.custom-date-field:focus {
+  border-color: #a78bfa;
+}
+
+.clear-date-btn {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  color: rgba(255, 255, 255, 0.6);
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.clear-date-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* Empty State Suggestions */
+.empty-suggestions-container {
+  margin: 16px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.suggestions-prompt {
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.empty-suggestion-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  max-width: 500px;
+}
+
+.empty-suggestion-chip {
+  background: rgba(167, 139, 250, 0.1);
+  border: 1px solid rgba(167, 139, 250, 0.25);
+  color: #c4b5fd;
+  border-radius: 20px;
+  padding: 6px 14px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.empty-suggestion-chip:hover {
+  background: rgba(167, 139, 250, 0.2);
+  color: #fff;
+  transform: translateY(-1px);
+}
