@@ -190,7 +190,7 @@ app.post(
 
             console.log("Running OCR on screenshot...");
 
-            const extractedText = await extractText(result.secure_url);
+            const extractedText = await extractText(req.file.buffer);
 
             console.log("Extracted text:");
             console.log(extractedText);
