@@ -1,8 +1,19 @@
+
 const mongoose = require("mongoose");
 const Screenshot = require("../models/Screenshot");
 const { generateEmbedding, cosineSimilarity } = require("./embeddings");
 
-// Words that typically don't carry core semantic intent in natural language screenshot queries
+// Configurable relevance thresholds.
+// Atlas scores and in-memory cosine scores use different scales.
+const MIN_ATLAS_VECTOR_SCORE = Number(
+  process.env.MIN_ATLAS_VECTOR_SCORE || 0.65
+);
+
+const MIN_COSINE_SIMILARITY = Number(
+  process.env.MIN_COSINE_SIMILARITY || 0.28
+);
+
+// Words that don't carry much search meaning.
 const STOP_WORDS = new Set([
   "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
   "has", "he", "in", "is", "it", "its", "of", "on", "that", "the",
@@ -12,27 +23,98 @@ const STOP_WORDS = new Set([
 ]);
 
 /**
- * Extracts meaningful keyword tokens from a query string.
+ * Extract meaningful keywords from a search query.
  */
 function extractQueryKeywords(query) {
   if (!query) return [];
-  return query
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/gi, " ")
-    .split(/\s+/)
-    .filter((token) => token.length > 1 && !STOP_WORDS.has(token));
+
+  return [
+    ...new Set(
+      query
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/gi, " ")
+        .split(/\s+/)
+        .filter(
+          (token) => token.length > 1 && !STOP_WORDS.has(token)
+        )
+    ),
+  ];
 }
 
 /**
- * Escapes regex special characters in a string.
+ * Escape special regex characters.
  */
 function escapeRegex(text) {
   return text.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, "\\$&");
 }
 
 /**
- * Performs keyword search over user's screenshots.
- * Matches originalName, extractedText, category, and aiData fields.
+ * Build a searchable string from screenshot information.
+ */
+function getSearchableText(doc) {
+  const aiData = doc.aiData || {};
+
+  return [
+    doc.originalName,
+    doc.extractedText,
+    doc.category,
+    aiData.title,
+    aiData.location,
+    aiData.orderId,
+    aiData.amount,
+    aiData.date,
+    aiData.email,
+    aiData.phone,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+}
+
+/**
+ * Build common filters for screenshot searches.
+ */
+function buildBaseFilter({
+  userId,
+  category,
+  startDate,
+  endDate,
+  important,
+}) {
+  const filter = {
+    userId: new mongoose.Types.ObjectId(userId),
+  };
+
+  if (category && category !== "All") {
+    filter.category = category;
+  }
+
+  if (typeof important === "boolean") {
+    filter.important = important;
+  }
+
+  if (startDate || endDate) {
+    filter.createdAt = {};
+
+    if (startDate) {
+      filter.createdAt.$gte = new Date(startDate);
+    }
+
+    if (endDate) {
+      const end = new Date(endDate);
+      end.setHours(23, 59, 59, 999);
+      filter.createdAt.$lte = end;
+    }
+  }
+
+  return filter;
+}
+
+/**
+ * Performs keyword search.
+ *
+ * For multiword searches, a document must match at least
+ * half of the meaningful query keywords.
  */
 async function performKeywordSearch({
   userId,
@@ -43,34 +125,22 @@ async function performKeywordSearch({
   important,
   maxCandidates = 100,
 }) {
-  const baseFilter = {
-    userId: new mongoose.Types.ObjectId(userId),
-  };
-
-  if (category && category !== "All") {
-    baseFilter.category = category;
-  }
-
-  if (typeof important === "boolean") {
-    baseFilter.important = important;
-  }
-
-  if (startDate || endDate) {
-    baseFilter.createdAt = {};
-    if (startDate) baseFilter.createdAt.$gte = new Date(startDate);
-    if (endDate) {
-      const end = new Date(endDate);
-      end.setHours(23, 59, 59, 999);
-      baseFilter.createdAt.$lte = end;
-    }
-  }
+  const baseFilter = buildBaseFilter({
+    userId,
+    category,
+    startDate,
+    endDate,
+    important,
+  });
 
   const cleanQuery = query ? query.trim() : "";
+
+  // Empty query: return recent screenshots.
   if (!cleanQuery) {
-    // If no text query, simply return sorted by recent
     const docs = await Screenshot.find(baseFilter)
       .sort({ createdAt: -1 })
       .limit(maxCandidates);
+
     return docs.map((doc, idx) => ({
       doc,
       keywordScore: 1 - idx * 0.001,
@@ -80,10 +150,14 @@ async function performKeywordSearch({
   }
 
   const keywords = extractQueryKeywords(cleanQuery);
+
+  if (keywords.length === 0) {
+    return [];
+  }
+
   const escapedFull = escapeRegex(cleanQuery);
   const fullRegex = new RegExp(escapedFull, "i");
 
-  // Build OR condition matching full query or individual key terms
   const matchConditions = [
     { originalName: fullRegex },
     { extractedText: fullRegex },
@@ -91,67 +165,104 @@ async function performKeywordSearch({
     { "aiData.title": fullRegex },
     { "aiData.location": fullRegex },
     { "aiData.orderId": fullRegex },
+    { "aiData.amount": fullRegex },
+    { "aiData.date": fullRegex },
+    { "aiData.email": fullRegex },
+    { "aiData.phone": fullRegex },
   ];
 
-  if (keywords.length > 0) {
-    for (const kw of keywords) {
-      const kwRegex = new RegExp(`\\b${escapeRegex(kw)}`, "i");
-      matchConditions.push({ originalName: kwRegex });
-      matchConditions.push({ extractedText: kwRegex });
-      matchConditions.push({ category: kwRegex });
-      matchConditions.push({ "aiData.title": kwRegex });
-      matchConditions.push({ "aiData.location": kwRegex });
-      matchConditions.push({ "aiData.orderId": kwRegex });
-    }
+  // Individual keyword matches.
+  for (const keyword of keywords) {
+    const keywordRegex = new RegExp(
+      `\\b${escapeRegex(keyword)}`,
+      "i"
+    );
+
+    matchConditions.push(
+      { originalName: keywordRegex },
+      { extractedText: keywordRegex },
+      { category: keywordRegex },
+      { "aiData.title": keywordRegex },
+      { "aiData.location": keywordRegex },
+      { "aiData.orderId": keywordRegex },
+      { "aiData.amount": keywordRegex },
+      { "aiData.date": keywordRegex },
+      { "aiData.email": keywordRegex },
+      { "aiData.phone": keywordRegex }
+    );
   }
 
-  const queryFilter = {
+  const matchedDocs = await Screenshot.find({
     ...baseFilter,
     $or: matchConditions,
-  };
+  }).limit(maxCandidates * 3);
 
-  const matchedDocs = await Screenshot.find(queryFilter)
-    .limit(maxCandidates * 2);
+  const requiredMatches = Math.max(
+    1,
+    Math.ceil(keywords.length * 0.5)
+  );
 
-  // Score documents based on relevance:
-  // - Full query exact match in originalName: 100 pts
-  // - Full query in extractedText: 60 pts
-  // - Each keyword match in title: 20 pts
-  // - Each keyword match in OCR text: 10 pts
-  // - Match in aiData metadata: 15 pts
   const scored = matchedDocs.map((doc) => {
     let score = 0;
+
     const name = (doc.originalName || "").toLowerCase();
     const ocr = (doc.extractedText || "").toLowerCase();
-    const cat = (doc.category || "").toLowerCase();
+    const categoryText = (doc.category || "").toLowerCase();
+    const aiData = doc.aiData || {};
+
+    const title = (aiData.title || "").toLowerCase();
+    const location = (aiData.location || "").toLowerCase();
+    const orderId = (aiData.orderId || "").toLowerCase();
+    const amount = String(aiData.amount || "").toLowerCase();
+    const date = String(aiData.date || "").toLowerCase();
+    const email = (aiData.email || "").toLowerCase();
+    const phone = String(aiData.phone || "").toLowerCase();
+
     const qLower = cleanQuery.toLowerCase();
 
     if (name.includes(qLower)) score += 100;
     if (ocr.includes(qLower)) score += 60;
-    if (cat.includes(qLower)) score += 30;
+    if (title.includes(qLower)) score += 80;
+    if (categoryText.includes(qLower)) score += 30;
 
-    for (const kw of keywords) {
-      if (name.includes(kw)) score += 20;
-      if (ocr.includes(kw)) score += 10;
-      if (cat.includes(kw)) score += 15;
-      if (doc.aiData) {
-        const title = (doc.aiData.title || "").toLowerCase();
-        const loc = (doc.aiData.location || "").toLowerCase();
-        const orderId = (doc.aiData.orderId || "").toLowerCase();
-        if (title.includes(kw)) score += 20;
-        if (loc.includes(kw) || orderId.includes(kw)) score += 15;
-      }
+    const searchableText = getSearchableText(doc);
+
+    const matchedKeywords = keywords.filter((keyword) =>
+      searchableText.includes(keyword)
+    );
+
+    for (const keyword of matchedKeywords) {
+      if (name.includes(keyword)) score += 20;
+      if (ocr.includes(keyword)) score += 10;
+      if (categoryText.includes(keyword)) score += 15;
+      if (title.includes(keyword)) score += 20;
+      if (location.includes(keyword)) score += 15;
+      if (orderId.includes(keyword)) score += 15;
+      if (amount.includes(keyword)) score += 15;
+      if (date.includes(keyword)) score += 15;
+      if (email.includes(keyword)) score += 15;
+      if (phone.includes(keyword)) score += 15;
     }
 
     return {
       doc,
       keywordScore: score,
+      matchedKeywordCount: matchedKeywords.length,
     };
   });
 
-  scored.sort((a, b) => b.keywordScore - a.keywordScore);
+  // Reject weak matches that only contain one unrelated query word.
+  const relevantResults = scored.filter(
+    (item) =>
+      item.keywordScore > 0 &&
+      item.matchedKeywordCount >= requiredMatches
+  );
 
-  return scored.slice(0, maxCandidates).map((item, idx) => ({
+  relevantResults.sort(
+    (a, b) => b.keywordScore - a.keywordScore
+  );
+
+  return relevantResults.slice(0, maxCandidates).map((item, idx) => ({
     doc: item.doc,
     keywordScore: item.keywordScore,
     rank: idx + 1,
@@ -161,8 +272,9 @@ async function performKeywordSearch({
 
 /**
  * Performs semantic vector search.
- * Attempts MongoDB Atlas Vector Search ($vectorSearch) first,
- * and transparently falls back to in-memory cosine similarity if Atlas Vector Search is unavailable.
+ *
+ * Tries MongoDB Atlas Vector Search first.
+ * Uses in-memory cosine similarity if Atlas is unavailable.
  */
 async function performSemanticSearch({
   userId,
@@ -173,18 +285,24 @@ async function performSemanticSearch({
   important,
   maxCandidates = 100,
 }) {
-  if (!queryVector || !Array.isArray(queryVector) || queryVector.length === 0) {
+  if (
+    !Array.isArray(queryVector) ||
+    queryVector.length !== 768
+  ) {
+    console.warn("[Vector Search] Invalid query vector.");
     return [];
   }
 
   const userObjectId = new mongoose.Types.ObjectId(userId);
-  const atlasIndexName = process.env.ATLAS_VECTOR_INDEX || "vector_index";
+  const atlasIndexName =
+    process.env.ATLAS_VECTOR_INDEX || "vector_index";
 
-  // 1. Try MongoDB Atlas Vector Search
+  // 1. Try MongoDB Atlas Vector Search.
   try {
     const vectorFilter = {
       userId: userObjectId,
     };
+
     if (category && category !== "All") {
       vectorFilter.category = category;
     }
@@ -194,8 +312,8 @@ async function performSemanticSearch({
         $vectorSearch: {
           index: atlasIndexName,
           path: "embedding",
-          queryVector: queryVector,
-          numCandidates: Math.max(maxCandidates * 3, 100),
+          queryVector,
+          numCandidates: Math.max(maxCandidates * 5, 200),
           limit: maxCandidates,
           filter: vectorFilter,
         },
@@ -203,7 +321,9 @@ async function performSemanticSearch({
       {
         $project: {
           _id: 1,
-          vectorScore: { $meta: "vectorSearchScore" },
+          vectorScore: {
+            $meta: "vectorSearchScore",
+          },
         },
       },
     ];
@@ -211,52 +331,89 @@ async function performSemanticSearch({
     const atlasResults = await Screenshot.aggregate(pipeline);
 
     if (Array.isArray(atlasResults) && atlasResults.length > 0) {
-      const ids = atlasResults.map((r) => r._id);
-      const docs = await Screenshot.find({ _id: { $in: ids } });
-      const docMap = new Map(docs.map((d) => [d._id.toString(), d]));
+      const ids = atlasResults.map((item) => item._id);
 
-      const results = [];
-      atlasResults.forEach((res, idx) => {
-        const doc = docMap.get(res._id.toString());
-        if (doc) {
-          // Check additional date/important filters if supplied
-          if (typeof important === "boolean" && doc.important !== important) {
-            return;
-          }
-          if (startDate && new Date(doc.createdAt) < new Date(startDate)) {
-            return;
-          }
-          if (endDate) {
-            const end = new Date(endDate);
-            end.setHours(23, 59, 59, 999);
-            if (new Date(doc.createdAt) > end) return;
-          }
-
-          results.push({
-            doc,
-            semanticScore: res.vectorScore || 0,
-            rank: idx + 1,
-            matchType: "semantic",
-          });
-        }
+      const docs = await Screenshot.find({
+        _id: { $in: ids },
       });
 
+      const docMap = new Map(
+        docs.map((doc) => [doc._id.toString(), doc])
+      );
+
+      const results = [];
+
+      for (const item of atlasResults) {
+        const doc = docMap.get(item._id.toString());
+
+        if (!doc) continue;
+
+        // Apply additional filters.
+        if (
+          typeof important === "boolean" &&
+          doc.important !== important
+        ) {
+          continue;
+        }
+
+        if (
+          startDate &&
+          new Date(doc.createdAt) < new Date(startDate)
+        ) {
+          continue;
+        }
+
+        if (endDate) {
+          const end = new Date(endDate);
+          end.setHours(23, 59, 59, 999);
+
+          if (new Date(doc.createdAt) > end) {
+            continue;
+          }
+        }
+
+        const score = Number(item.vectorScore) || 0;
+
+        // Reject weak Atlas matches.
+        if (score < MIN_ATLAS_VECTOR_SCORE) {
+          continue;
+        }
+
+        results.push({
+          doc,
+          semanticScore: score,
+          rank: results.length + 1,
+          matchType: "semantic",
+        });
+      }
+
+      console.log(
+        `[Vector Search] Atlas returned ${results.length} relevant results.`
+      );
+
+      // Atlas successfully returned candidates.
+      // Do not add unrelated fallback results.
       return results;
     }
-  } catch (atlasError) {
-    // Atlas Vector Search not configured or not running in Atlas cluster.
-    // Fall back to in-memory cosine similarity below.
+
     console.info(
-      "[Vector Search] Atlas $vectorSearch unavailable, using in-memory cosine similarity fallback:",
+      "[Vector Search] Atlas returned no candidates. Trying fallback."
+    );
+  } catch (atlasError) {
+    console.info(
+      "[Vector Search] Atlas unavailable. Using in-memory fallback:",
       atlasError.message
     );
   }
 
-  // 2. Safe Fallback: In-memory Cosine Similarity
+  // 2. In-memory cosine similarity fallback.
   try {
     const fallbackFilter = {
       userId: userObjectId,
-      embedding: { $exists: true, $ne: [] },
+      embedding: {
+        $exists: true,
+        $ne: [],
+      },
     };
 
     if (category && category !== "All") {
@@ -269,7 +426,11 @@ async function performSemanticSearch({
 
     if (startDate || endDate) {
       fallbackFilter.createdAt = {};
-      if (startDate) fallbackFilter.createdAt.$gte = new Date(startDate);
+
+      if (startDate) {
+        fallbackFilter.createdAt.$gte = new Date(startDate);
+      }
+
       if (endDate) {
         const end = new Date(endDate);
         end.setHours(23, 59, 59, 999);
@@ -277,26 +438,39 @@ async function performSemanticSearch({
       }
     }
 
-    // Retrieve user's embedded screenshots with vector data
     const candidates = await Screenshot.find(fallbackFilter)
       .select("+embedding")
       .limit(300);
 
-    if (!candidates || candidates.length === 0) {
+    if (!candidates.length) {
       return [];
     }
 
     const scored = candidates
-      .map((doc) => {
-        const sim = cosineSimilarity(queryVector, doc.embedding);
-        return {
-          doc,
-          semanticScore: sim,
-        };
-      })
-      .filter((item) => item.semanticScore > 0.28) // meaningful threshold for text-embedding-004
-      .sort((a, b) => b.semanticScore - a.semanticScore)
+      .filter(
+        (doc) =>
+          Array.isArray(doc.embedding) &&
+          doc.embedding.length === queryVector.length
+      )
+      .map((doc) => ({
+        doc,
+        semanticScore: cosineSimilarity(
+          queryVector,
+          doc.embedding
+        ),
+      }))
+      .filter(
+        (item) =>
+          item.semanticScore >= MIN_COSINE_SIMILARITY
+      )
+      .sort(
+        (a, b) => b.semanticScore - a.semanticScore
+      )
       .slice(0, maxCandidates);
+
+    console.log(
+      `[Vector Search] In-memory fallback returned ${scored.length} relevant results.`
+    );
 
     return scored.map((item, idx) => ({
       doc: item.doc,
@@ -305,25 +479,34 @@ async function performSemanticSearch({
       matchType: "semantic",
     }));
   } catch (fallbackError) {
-    console.error("[Vector Search] Fallback failed:", fallbackError.message);
+    console.error(
+      "[Vector Search] Fallback failed:",
+      fallbackError.message
+    );
+
     return [];
   }
 }
 
 /**
- * Combines keyword and semantic search results using Reciprocal Rank Fusion (RRF).
- * RRF formula: RRF_score = W_sem / (k + rank_sem) + W_kw / (k + rank_kw)
+ * Combines keyword and semantic results using
+ * Reciprocal Rank Fusion (RRF).
  */
-function mergeHybridResults(keywordResults, semanticResults, limit = 50) {
-  const K = 60; // Standard RRF smoothing constant
+function mergeHybridResults(
+  keywordResults,
+  semanticResults,
+  limit = 50
+) {
+  const K = 60;
   const W_KEYWORD = 1.0;
   const W_SEMANTIC = 1.25;
 
   const combinedMap = new Map();
 
-  // Process semantic results
+  // Add semantic results.
   for (const item of semanticResults) {
     const id = item.doc._id.toString();
+
     const rrfScore = W_SEMANTIC / (K + item.rank);
 
     combinedMap.set(id, {
@@ -337,16 +520,19 @@ function mergeHybridResults(keywordResults, semanticResults, limit = 50) {
     });
   }
 
-  // Process keyword results
+  // Add keyword results.
   for (const item of keywordResults) {
     const id = item.doc._id.toString();
+
     const rrfScore = W_KEYWORD / (K + item.rank);
 
     if (combinedMap.has(id)) {
       const existing = combinedMap.get(id);
+
       existing.rrfScore += rrfScore;
       existing.keywordRank = item.rank;
       existing.keywordScore = item.keywordScore || 0;
+
       if (!existing.matchReasons.includes("keyword")) {
         existing.matchReasons.push("keyword");
       }
@@ -363,13 +549,15 @@ function mergeHybridResults(keywordResults, semanticResults, limit = 50) {
     }
   }
 
-  // Convert map to sorted array
   const ranked = Array.from(combinedMap.values());
+
   ranked.sort((a, b) => b.rrfScore - a.rrfScore);
 
   return ranked.slice(0, limit).map((item) => {
-    // Clean document before returning to client (ensure embedding is excluded)
-    const docObj = item.doc.toObject ? item.doc.toObject() : { ...item.doc };
+    const docObj = item.doc.toObject
+      ? item.doc.toObject()
+      : { ...item.doc };
+
     delete docObj.embedding;
 
     return {
@@ -377,16 +565,16 @@ function mergeHybridResults(keywordResults, semanticResults, limit = 50) {
       _searchMetadata: {
         hybridScore: Number(item.rrfScore.toFixed(4)),
         matchReasons: item.matchReasons,
-        semanticScore: item.semanticScore
-          ? Number(item.semanticScore.toFixed(3))
-          : undefined,
+        semanticScore: Number(
+          item.semanticScore.toFixed(3)
+        ),
       },
     };
   });
 }
 
 /**
- * Main Hybrid Search Entry Point.
+ * Main hybrid search entry point.
  */
 async function hybridSearch({
   userId,
@@ -399,10 +587,18 @@ async function hybridSearch({
   limit = 50,
 }) {
   const cleanQuery = (query || "").trim();
-  const parsedLimit = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 100);
-  const parsedPage = Math.max(parseInt(page, 10) || 1, 1);
 
-  // 1. If query is empty, perform standard filtered fetch
+  const parsedLimit = Math.min(
+    Math.max(parseInt(limit, 10) || 50, 1),
+    100
+  );
+
+  const parsedPage = Math.max(
+    parseInt(page, 10) || 1,
+    1
+  );
+
+  // 1. Empty query: return filtered screenshots.
   if (!cleanQuery) {
     const keywordItems = await performKeywordSearch({
       userId,
@@ -415,10 +611,17 @@ async function hybridSearch({
     });
 
     const paginated = keywordItems
-      .slice((parsedPage - 1) * parsedLimit, parsedPage * parsedLimit)
+      .slice(
+        (parsedPage - 1) * parsedLimit,
+        parsedPage * parsedLimit
+      )
       .map((item) => {
-        const obj = item.doc.toObject ? item.doc.toObject() : item.doc;
+        const obj = item.doc.toObject
+          ? item.doc.toObject()
+          : { ...item.doc };
+
         delete obj.embedding;
+
         return obj;
       });
 
@@ -431,7 +634,7 @@ async function hybridSearch({
     };
   }
 
-  // 2. Parallel keyword retrieval and query embedding generation
+  // 2. Run keyword search and query embedding in parallel.
   const [keywordResults, queryVector] = await Promise.all([
     performKeywordSearch({
       userId,
@@ -442,17 +645,20 @@ async function hybridSearch({
       important,
       maxCandidates: 100,
     }),
-    generateEmbedding(cleanQuery, "query").catch((err) => {
+
+    generateEmbedding(cleanQuery, "query").catch((error) => {
       console.warn(
-        "[Hybrid Search] Query embedding generation failed:",
-        err.message
+        "[Hybrid Search] Query embedding failed:",
+        error.message
       );
+
       return null;
     }),
   ]);
 
-  // 3. If query embedding succeeded, perform semantic search
+  // 3. Run semantic search when query embedding is available.
   let semanticResults = [];
+
   if (queryVector) {
     semanticResults = await performSemanticSearch({
       userId,
@@ -465,12 +671,24 @@ async function hybridSearch({
     });
   }
 
-  // 4. Combine and rank using Reciprocal Rank Fusion
+  // 4. Combine results using RRF.
   let searchType = "hybrid";
-  if (semanticResults.length > 0 && keywordResults.length === 0) {
+
+  if (
+    semanticResults.length > 0 &&
+    keywordResults.length === 0
+  ) {
     searchType = "semantic";
-  } else if (semanticResults.length === 0 && keywordResults.length > 0) {
+  } else if (
+    semanticResults.length === 0 &&
+    keywordResults.length > 0
+  ) {
     searchType = "keyword";
+  } else if (
+    semanticResults.length === 0 &&
+    keywordResults.length === 0
+  ) {
+    searchType = "no-results";
   }
 
   const merged = mergeHybridResults(
@@ -482,6 +700,10 @@ async function hybridSearch({
   const paginated = merged.slice(
     (parsedPage - 1) * parsedLimit,
     parsedPage * parsedLimit
+  );
+
+  console.log(
+    `[Hybrid Search] Query: "${cleanQuery}" | Keywords: ${keywordResults.length} | Semantic: ${semanticResults.length} | Final: ${merged.length}`
   );
 
   return {
