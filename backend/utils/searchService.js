@@ -442,7 +442,7 @@ async function hybridSearch({
       important,
       maxCandidates: 100,
     }),
-    generateEmbedding(cleanQuery).catch((err) => {
+    generateEmbedding(cleanQuery, "query").catch((err) => {
       console.warn(
         "[Hybrid Search] Query embedding generation failed:",
         err.message
